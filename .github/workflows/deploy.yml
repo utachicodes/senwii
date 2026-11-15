@@ -1,0 +1,31 @@
+name: Deploy to VPS
+
+# Pushing to main pulls the new commit onto the VPS and rebuilds just the
+# senwii app container (not the Caddy container sitting in front of it, so
+# the TLS cert/config it holds is never touched by a deploy).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/senwii
+            git fetch origin
+            git merge --ff-only origin/main
+            docker compose -f docker-compose.vps.yml up -d --build senwii
+            docker image prune -f
