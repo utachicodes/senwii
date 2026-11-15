@@ -15,6 +15,17 @@
  * silver. If this page's audio was still policy-blocked, a flag tells the
  * menu to ring the chime on arrival instead — one chime either way.
  */
+// Safari's back-forward cache freezes a game page's JS state at the exact
+// instant goHome() fired and restores it unchanged on a forward/back
+// navigation back to that page — including `goHome.leaving`, which then
+// stays truthy forever and silently no-ops every future B/Home press. See
+// the identical fix for the menu's own `launching` flag in public/menu.js.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) goHome.leaving = false;
+  });
+}
+
 export function goHome(audio, room) {
   if (goHome.leaving) return;
   goHome.leaving = true;

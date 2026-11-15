@@ -221,6 +221,18 @@
   #enable:active { transform: scale(.98); }
   #enable:disabled { opacity: .4; }
 
+  /* ── First-play hint: what to actually do, once sensors are live ──────── */
+  #hint {
+    position: fixed; left: 50%; top: max(18px, env(safe-area-inset-top));
+    transform: translate(-50%, -14px); z-index: 18;
+    background: #161c29ee; border: 1px solid #262f42; border-radius: 16px;
+    padding: 14px 20px; text-align: center; max-width: min(84vw, 320px);
+    opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease;
+  }
+  #hint.on { opacity: 1; transform: translate(-50%, 0); }
+  #hint p { margin: 0; font-size: 14px; color: #e8ecf4; line-height: 1.4; }
+  #hint b { color: #7fb7ff; }
+
   /* ── Status sheet (button 2) ─────────────────────────────────────────── */
   #sheet {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 15;
@@ -320,6 +332,10 @@ body.wheel-mode::before {content:'';position:fixed;inset:0;background:#10141c;po
       <p>Grant motion access, then hold the phone however feels natural and point it at the screen.</p>
       <button id="enable">Enable motion sensors</button>
     </div>
+  </div>
+
+  <div id="hint">
+    <p>Point at the screen. Press <b>A</b> to select.</p>
   </div>
 
   <div id="sheet">

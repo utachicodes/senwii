@@ -24,7 +24,7 @@ const roomCode = new URLSearchParams(window.location.search).get('room') || '';
 const $ = (id) => document.getElementById(id);
 const els = {
   net: $('net'), dotNet: $('dot-net'), hz: $('hz'), player: $('player'),
-  gate: $('gate'), enable: $('enable'),
+  gate: $('gate'), enable: $('enable'), hint: $('hint'),
   remote: $('remote'), stage: $('stage'),
   btnA: $('btn-a'), btnB: $('btn-b'),
   btnHome: $('btn-home'), btnMinus: $('btn-minus'), btnPlus: $('btn-plus'),
@@ -414,6 +414,26 @@ async function lockUpright() {
   } catch { /* unsupported (iOS) or denied — the phone's own lock still works */ }
 }
 
+/**
+ * What to actually do with this thing, shown once per device: granting
+ * motion access lands you on a full Wii-remote face with no obvious next
+ * step, so say it outright rather than leaving a first-time player to guess
+ * at the D-pad/minus/home/plus row before they've ever pressed A. Dismissed
+ * by that first A press, or a timeout if they never press it.
+ */
+function showFirstPlayHint() {
+  let seen = false;
+  try { seen = localStorage.getItem('senwii.controllerHintSeen') === '1'; } catch { /* fine */ }
+  if (seen) return;
+  els.hint.classList.add('on');
+  const dismiss = () => {
+    els.hint.classList.remove('on');
+    try { localStorage.setItem('senwii.controllerHintSeen', '1'); } catch { /* fine */ }
+  };
+  els.btnA.addEventListener('pointerdown', dismiss, { once: true });
+  setTimeout(dismiss, 4500);
+}
+
 els.enable.addEventListener('click', async () => {
   els.enable.disabled = true;
   phoneAudioUnlock();
@@ -427,6 +447,7 @@ els.enable.addEventListener('click', async () => {
     speakerTalk(400);
     keepAwake();
     lockUpright();
+    showFirstPlayHint();
     // Zero the mapping the moment the sword goes live.
     socket.emit('command', { type: 'calibrate' });
   } catch (err) {

@@ -61,6 +61,18 @@ ensureAudio();
 let launching = null;        // { el, t, rect } during the launch zoom
 let latencyMs = null;
 
+// Safari's back-forward cache freezes this whole page's JS state — including
+// `launching` — at the exact instant you clicked a game, then restores it
+// unchanged on a back navigation. Without this, `launching` stays truthy
+// forever and pressA()/every click silently no-ops: the menu *looks* fine
+// but is permanently inert. `pageshow`'s `persisted` flag is how a page
+// tells a bfcache restore apart from a normal load.
+window.addEventListener('pageshow', (e) => {
+  if (!e.persisted) return;
+  launching = null;
+  document.getElementById('launch')?.remove();
+});
+
 // Backing out of a game stashes its room code (see core/splash.js) so
 // returning here reclaims it instead of stranding any phone still connected.
 let homeRoom = null;

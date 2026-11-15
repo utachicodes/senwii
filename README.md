@@ -6,20 +6,23 @@
 ![Three.js](https://img.shields.io/badge/three.js-r185-black?logo=three.js&logoColor=white)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-Motion-controlled games for the browser — your phone is the remote. A
+Motion-controlled games for the browser: your phone is the remote. A
 Node/Socket.io relay streams phone IMU data over the LAN to a game running on
 the PC.
 
+**Live:** [www.senwii.utachi.website](https://www.senwii.utachi.website/)
+(scan the QR there with your phone, no install).
+
 ## Why this and not another phone-as-controller app
 
-Most "scan a QR, phone is the controller" setups use the phone as a keypad —
+Most "scan a QR, phone is the controller" setups use the phone as a keypad:
 buttons and taps forwarded over the network. SenWii reads the phone's actual
 gyro and accelerometer and turns the motion itself into the input: a swing is
 a swing, a tilt is a tilt, not a button mapped to one.
 
 That only works if it works for everyone holding the phone differently, so
 the pointer engine (`core/pointer.js`) learns each device's gyro-axis
-convention from its own data at runtime rather than assuming one — the same
+convention from its own data at runtime rather than assuming one: the same
 swing reads correctly whether the phone's flat, upright, or sideways, with no
 calibration screen. No app to install either: the controller is a web page,
 same as the game.
@@ -33,13 +36,13 @@ games/<slug>/     One folder per game, each with its own index.html.
 ```
 
 A game is any folder under `games/` containing an `index.html`. No registry to
-edit — the server scans on boot. `game.json` (title/tagline/emoji) is optional
+edit: the server scans on boot. `game.json` (title/tagline/emoji) is optional
 and only feeds the launcher card.
 
 ## Things that will bite you
 
 - **Sensors need HTTPS.** Browsers block motion sensors on insecure origins and
-  Chrome does it silently — listeners attach, no error, no events. `npm start`
+  Chrome does it silently: listeners attach, no error, no events. `npm start`
   serves HTTPS with a self-signed cert. `HTTP=1` is mouse-only.
 - **Never send orientation `volatile`.** Socket.IO drops volatile packets when
   the transport isn't writable, which on long-polling is most of the time.
@@ -87,7 +90,7 @@ play.
 | [Air Hockey](games/air-hockey/) | Point to move your mallet. Defend your goal, pot the puck in theirs. | 1 |
 
 Golf, Table Tennis, Swordplay, Kart Time Trial and Island Flyover exist under
-`games/` but are marked `hidden` in their `game.json` — in active development,
+`games/` but are marked `hidden` in their `game.json`: in active development,
 reachable by direct URL, not yet on the launcher menu.
 
 ## How it works
@@ -116,30 +119,30 @@ reads it from `?room=`.
 
 ## Running online
 
-`npm start`'s self-signed cert and LAN IP scan are a local-play convenience —
+`npm start`'s self-signed cert and LAN IP scan are a local-play convenience:
 they don't mean anything once this isn't running on your own network. For a
 public deployment, a platform's own edge (Fly.io, Render, Railway, an nginx
 box you run yourself) terminates real TLS and forwards plain HTTP to the
 container; set `TRUST_PROXY=1` and the server adapts:
 
-- It skips `ensureCert()` entirely and just serves HTTP on `PORT` — there's no
-  LAN to generate a cert for.
+- It skips `ensureCert()` entirely and just serves HTTP on `PORT`, since there's
+  no LAN to generate a cert for.
 - `app.set('trust proxy', 1)` so Express reads the edge's `X-Forwarded-*`
   headers instead of this process's own (plain-HTTP) view of itself.
 - `/api/pairing`'s QR and join URL are built from the *request's* own `Host`
-  header and protocol, not a scanned LAN address — the only thing that's
-  actually correct once "the server" and "the network phones are on" aren't
-  the same LAN anymore.
+  header and protocol, not a scanned LAN address: that's the only thing
+  that's actually correct once "the server" and "the network phones are on"
+  aren't the same LAN anymore.
 
-A `Dockerfile` and `fly.toml` are included — `fly launch` (after renaming
+A `Dockerfile` and `fly.toml` are included: `fly launch` (after renaming
 `app` in `fly.toml`) or an equivalent Render/Railway service pointed at the
 same Dockerfile both work, since neither needs anything beyond `TRUST_PROXY`
-and `PORT`. Sensors need a genuinely secure context, same as local HTTPS —
+and `PORT`. Sensors need a genuinely secure context, same as local HTTPS, so
 double-check the platform's default domain/cert actually serves HTTPS before
 expecting phones to connect.
 
 What this doesn't change: the relay is still a single in-memory process (see
-"How it works") — `rooms`/`roles`/`socketRoom` all live in one Node process's
+"How it works"). `rooms`/`roles`/`socketRoom` all live in one Node process's
 memory, so this deploys as **one instance**, not a horizontally-scaled
 fleet, until that state moves to something shared (Redis, etc.). For a
 friend-group game night this is the right amount of infrastructure; for
