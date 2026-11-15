@@ -1,101 +1,361 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OpenWii</title>
-<style>
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; height: 100%; overflow: hidden; cursor: none;
-    background: #e4eaf1; color: #33404f;
-    font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    user-select: none;
-  }
-  canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SenWii</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /*
+     * Instrument-panel menu: bright blueprint paper, navy ink, amber accent.
+     * This is the Wii channel menu's successor — still aimable and
+     * selectable with a phone's pointer (hand cursors + press-A), just
+     * rendered as real DOM instead of a Three.js world.
+     */
+    :root {
+      --bg: #eef1f6;
+      --panel: #ffffff;
+      --panel-2: #e4e9f1;
+      --line: #c9d2e0;
+      --line-bright: #a7b4c9;
+      --fg: #121a2b;
+      --muted: #51607a;
+      --dim: #8392ac;
+      --amber: #c2660a;
+      --green: #15803d;
+      --sky: #bcd7ec;
+      --ground: #ddc9a0;
+      --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+      --font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+      color-scheme: light;
+    }
 
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background:
+        repeating-linear-gradient(0deg, transparent 0 39px, rgba(18,26,43,0.035) 39px 40px),
+        repeating-linear-gradient(90deg, transparent 0 39px, rgba(18,26,43,0.035) 39px 40px),
+        var(--bg);
+      color: var(--fg);
+      font: 400 15.5px/1.6 var(--font-sans);
+      padding-left: max(16px, env(safe-area-inset-left, 0px));
+      padding-right: max(16px, env(safe-area-inset-right, 0px));
+      overflow-x: hidden;
+      cursor: none;
+    }
+    ::selection { background: var(--amber); color: #fff; }
+    svg.icon { width: 1em; height: 1em; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    a { color: inherit; }
 
-  /* ── Calibration ─────────────────────────────────────────────────────── */
-  #cal {
-    position: absolute; inset: 0; z-index: 15; display: grid; place-items: center;
-    background: rgba(240, 244, 249, 0.93); text-align: center; padding: 0 8vw;
-  }
-  #cal.hide { display: none; }
-  #cal h2 { font-size: clamp(26px, 3.6vw, 44px); margin: 0 0 10px; letter-spacing: -0.03em; }
-  #cal p { color: #64758a; margin: 0 auto; max-width: 520px; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding-bottom: 72px; }
 
-  /* ── Chrome ──────────────────────────────────────────────────────────── */
-  #link {
-    position: absolute; right: 22px; top: 20px; display: flex; align-items: center; gap: 9px;
-    font-size: 12px; color: #6b7b8f; background: #ffffffcc; border: 1px solid #c9d4e0;
-    padding: 8px 13px; border-radius: 999px; z-index: 10;
-  }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #b6c2d0; }
-  .dot.on { background: #35d07f; }
+    /* ── telemetry ticker ─────────────────────────────────────────────── */
+    .ticker {
+      margin: 0 -16px 0; border-bottom: 1px solid var(--line);
+      background: var(--panel); overflow: hidden; white-space: nowrap; padding-block: 7px;
+    }
+    .ticker span {
+      display: inline-block; padding-left: 100%; animation: scroll 22s linear infinite;
+      font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .04em; color: var(--muted);
+    }
+    .ticker b { color: var(--green); font-weight: 600; }
+    @keyframes scroll { to { transform: translateX(-100%); } }
 
+    /* ── header ───────────────────────────────────────────────────────── */
+    header.bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding-block: 20px; flex-wrap: wrap;
+      border-bottom: 1px solid var(--line); margin-bottom: 48px;
+    }
+    .wordmark { font-family: var(--font-mono); font-weight: 700; font-size: 16px; letter-spacing: .03em; display: flex; align-items: center; gap: 10px; }
+    .wordmark .led { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); transition: background .3s; }
+    .wordmark .led.on { background: var(--green); }
+    nav.links { display: flex; gap: 6px; font-size: 12px; }
+    nav.links a {
+      text-decoration: none; font-family: var(--font-mono); letter-spacing: .03em;
+      padding: 7px 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--muted);
+    }
+    nav.links a:hover, nav.links a:focus-visible { color: var(--fg); border-color: var(--line-bright); }
 
-  #keys {
-    position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
-    font-size: 11px; color: #8494a7; z-index: 10; letter-spacing: .02em;
-    white-space: nowrap;
-  }
-  #speed {
-    position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%);
-    font-size: 14px; font-weight: 600; color: #4a5c72; z-index: 11;
-    background: #ffffffe6; border: 1px solid #c9d4e0; border-radius: 999px;
-    padding: 7px 16px; opacity: 0; transition: opacity .2s; pointer-events: none;
-  }
-  #speed.on { opacity: 1; }
-  #debug {
-    position: absolute; right: 22px; bottom: 22px; margin: 0; display: none; z-index: 10;
-    background: #ffffffe6; border: 1px solid #c9d4e0; border-radius: 10px; padding: 12px 14px;
-    font: 11px/1.6 ui-monospace, Menlo, monospace; color: #5c6e83; white-space: pre;
-  }
-  #debug.on { display: block; }
+    /* ── hero ─────────────────────────────────────────────────────────── */
+    .hero { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 50px; align-items: start; margin-bottom: 56px; }
+    @media (max-width: 860px) { .hero { grid-template-columns: 1fr; } }
 
-  /* ── Launch banner: grows from the pressed tile to full screen ───────── */
-  #launch {
-    position: fixed; z-index: 30; border-radius: 18px; overflow: hidden;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 2vmin; box-shadow: 0 20px 60px #33507044;
-    transition: left .55s cubic-bezier(.3,.85,.3,1), top .55s cubic-bezier(.3,.85,.3,1),
-      width .55s cubic-bezier(.3,.85,.3,1), height .55s cubic-bezier(.3,.85,.3,1),
-      border-radius .55s ease;
-  }
-  #launch.full { left: 0 !important; top: 0 !important;
-    width: 100vw !important; height: 100vh !important; border-radius: 0; }
-  #launch .l-emoji { font-size: 17vmin; filter: drop-shadow(0 1.2vmin 2.5vmin rgba(0,0,0,.3)); }
-  #launch .l-title { font-size: 5vmin; font-weight: 700; color: #fff;
-    text-shadow: 0 .3vmin 1.2vmin rgba(0,0,0,.45); }
+    .tag {
+      display: inline-block; font-family: var(--font-mono); font-size: 11px; color: var(--amber);
+      border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+      background: color-mix(in srgb, var(--amber) 8%, var(--panel));
+      padding: 4px 9px; border-radius: 3px; letter-spacing: .05em; margin-bottom: 20px;
+    }
+    h1 { font-family: var(--font-mono); font-weight: 700; margin: 0 0 18px; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.12; letter-spacing: -0.01em; text-wrap: balance; }
+    h1 u { text-decoration-color: var(--amber); text-decoration-thickness: 3px; text-underline-offset: 6px; color: var(--amber); }
+    .hero p.lede { color: var(--muted); font-size: 16px; max-width: 54ch; margin: 0 0 28px; }
 
-  /* Narrow windows: the pairing card shrinks and the desk-keyboard hint goes —
-     it collides with the bar, and on a window that shape you're pairing a
-     phone, not testing with a keyboard. */
-  @media (max-width: 720px) {
-    #keys { display: none; }
-    #pair { gap: 9px; padding: 8px 11px 8px 8px; }
-    #pair img { width: 46px; height: 46px; }
-    #pair-url { font-size: 9px; }
-  }
-</style>
+    .hero-ctas { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 34px; }
+    .btn {
+      font: 600 13.5px var(--font-mono); letter-spacing: .02em; border-radius: 4px; padding: 12px 20px;
+      border: 1px solid var(--line-bright); cursor: pointer; text-decoration: none;
+      display: inline-flex; align-items: center; gap: 8px; background: var(--panel); color: var(--fg);
+    }
+    .btn-primary { background: var(--fg); border-color: var(--fg); color: #fff; }
+    .btn-primary:hover { background: #28344c; }
+    .btn-ghost:hover { border-color: var(--fg); }
+
+    .readout-row { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; width: fit-content; background: var(--panel); }
+    .readout { padding: 10px 18px; border-right: 1px solid var(--line); }
+    .readout:last-child { border-right: none; }
+    .readout b { display: block; font-family: var(--font-mono); font-size: 18px; color: var(--fg); font-variant-numeric: tabular-nums; }
+    .readout span { color: var(--dim); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
+
+    /* ── attitude indicator ───────────────────────────────────────────── */
+    .instrument { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 20px; position: relative; }
+    .instrument .corner { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: var(--line-bright); }
+    .instrument .corner.tl { top: 8px; left: 8px; } .instrument .corner.tr { top: 8px; right: 8px; }
+    .instrument .corner.bl { bottom: 8px; left: 8px; } .instrument .corner.br { bottom: 8px; right: 8px; }
+    .instrument-label { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 10px; }
+    .horizon-stage { display: grid; place-items: center; padding: 10px 0 18px; }
+    .horizon-stage svg { width: 100%; max-width: 230px; }
+    #horizon-rot { transition: transform .12s ease-out; transform-origin: 100px 100px; }
+    .telemetry { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border-radius: 4px; overflow: hidden; }
+    .telemetry div { background: var(--panel-2); padding: 10px 8px; text-align: center; }
+    .telemetry b { display: block; font-family: var(--font-mono); font-size: 15px; font-variant-numeric: tabular-nums; }
+    .telemetry span { font-size: 9.5px; color: var(--dim); letter-spacing: .06em; }
+
+    /* ── section heads ────────────────────────────────────────────────── */
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 52px 0 20px; gap: 16px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 28px; }
+    .section-head h2 { font-family: var(--font-mono); font-size: 13px; margin: 0; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .section-head h2 b { color: var(--fg); }
+    .section-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 38ch; }
+
+    /* ── manifest / join panel ────────────────────────────────────────── */
+    .manifest { display: grid; grid-template-columns: 1fr auto; border: 1px solid var(--line-bright); border-radius: 4px; background: var(--panel); position: relative; }
+    .manifest::before {
+      content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%;
+      background: var(--bg); border: 1px solid var(--line-bright); top: 50%; transform: translateY(-50%); left: calc(72% - 7px);
+    }
+    @media (max-width: 640px) { .manifest::before { display: none; } }
+    .manifest-main { padding: 24px 26px; min-width: 0; }
+    .manifest-stub { padding: 24px 22px; border-left: 1px dashed var(--line-bright); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-width: 150px; }
+    @media (max-width: 640px) { .manifest { grid-template-columns: 1fr; } .manifest-stub { border-left: none; border-top: 1px dashed var(--line-bright); } }
+    .manifest-main .instrument-label { margin-bottom: 18px; }
+    .code-row { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+    .code { font-family: var(--font-mono); font-size: 15px; font-weight: 600; letter-spacing: .01em; color: var(--fg); word-break: break-all; }
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--green);
+      border: 1px solid color-mix(in srgb, var(--green) 40%, var(--line)); padding: 4px 9px; border-radius: 3px;
+      background: color-mix(in srgb, var(--green) 7%, var(--panel)); white-space: nowrap;
+    }
+    .status-pill.off { color: var(--dim); border-color: var(--line); background: var(--panel-2); }
+    .status-pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .bays { display: flex; gap: 10px; }
+    .bay { flex: 1; border: 1px solid var(--line); border-radius: 3px; padding: 8px 6px; text-align: center; background: var(--panel-2); }
+    .bay i { display: block; width: 7px; height: 7px; border-radius: 50%; margin: 0 auto 6px; background: var(--dim); }
+    .bay.on { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 9%, var(--panel)); }
+    .bay.on i { background: var(--green); }
+    .bay span { font-family: var(--font-mono); font-size: 10px; color: var(--dim); }
+    .manifest-stub img { width: 96px; height: 96px; border-radius: 2px; border: 1px solid var(--line); display: block; background: #fff; }
+    .manifest-stub small { font-family: var(--font-mono); font-size: 10px; color: var(--dim); text-align: center; }
+
+    /* ── cartridge list ────────────────────────────────────────────────── */
+    .cart-list { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+    .cart {
+      background: var(--panel); display: grid; grid-template-columns: auto 1fr auto auto; align-items: center;
+      gap: 16px; padding: 16px 20px; text-decoration: none; color: inherit; position: relative;
+    }
+    .cart:hover, .cart:focus-visible, .cart.hover { background: var(--panel-2); }
+    .cart:hover .cart-led, .cart:focus-visible .cart-led, .cart.hover .cart-led { background: var(--amber); }
+    .cart-led { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+    .cart-plate { width: 42px; height: 42px; display: grid; place-items: center; font-size: 19px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); color: var(--fg); }
+    .cart-copy { min-width: 0; }
+    .cart-copy h3 { font-family: var(--font-mono); font-size: 14.5px; margin: 0 0 3px; letter-spacing: .01em; }
+    .cart-copy p { margin: 0; color: var(--muted); font-size: 12.5px; }
+    .cart-players { font-family: var(--font-mono); font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 4px 8px; white-space: nowrap; }
+    @media (max-width: 560px) { .cart { grid-template-columns: auto 1fr; } .cart-players { display: none; } }
+    .cart-empty { padding: 20px; color: var(--dim); font-family: var(--font-mono); font-size: 12.5px; background: var(--panel); }
+
+    /* ── how it works ─────────────────────────────────────────────────── */
+    .how { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+    @media (max-width: 760px) { .how { grid-template-columns: 1fr; } }
+    .how .step { background: var(--panel); padding: 22px; }
+    .how .num { font-family: var(--font-mono); font-size: 11px; color: var(--amber); letter-spacing: .05em; margin-bottom: 12px; }
+    .how h4 { font-family: var(--font-mono); font-size: 14px; margin: 0 0 6px; }
+    .how p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; color: var(--dim); font-size: 11.5px; font-family: var(--font-mono); }
+    footer span { display: inline-flex; align-items: center; gap: 6px; }
+
+    /* ── phone-driven hand cursors ────────────────────────────────────── */
+    .hand {
+      position: fixed; top: 0; left: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px;
+      border-radius: 50%; border: 2px solid var(--fg); background: color-mix(in srgb, var(--amber) 25%, transparent);
+      pointer-events: none; z-index: 50; display: none; transition: background .15s;
+    }
+    .hand.p1 { border-color: var(--amber); }
+    .hand.p2 { border-color: var(--green); }
+    .hand.p3 { border-color: #3b5bd6; }
+    .hand.p4 { border-color: var(--muted); }
+
+    /* ── transient speed/sound pill ───────────────────────────────────── */
+    #speed {
+      position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+      font: 600 13px var(--font-mono); color: var(--fg); background: var(--panel); border: 1px solid var(--line-bright);
+      border-radius: 999px; padding: 9px 18px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60;
+    }
+    #speed.on { opacity: 1; }
+    #debug {
+      position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: 18px; margin: 0; display: none; z-index: 60;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
+      font: 11px/1.6 var(--font-mono); color: var(--muted); white-space: pre;
+    }
+    #debug.on { display: block; }
+
+    /* ── launch transition banner ─────────────────────────────────────── */
+    #launch {
+      position: fixed; z-index: 70; border-radius: 10px; overflow: hidden; background: var(--fg); color: #fff;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2vmin;
+      box-shadow: 0 20px 60px rgba(18,26,43,0.25);
+      transition: left .5s cubic-bezier(.3,.85,.3,1), top .5s cubic-bezier(.3,.85,.3,1),
+        width .5s cubic-bezier(.3,.85,.3,1), height .5s cubic-bezier(.3,.85,.3,1), border-radius .5s ease;
+    }
+    #launch.full { left: 0 !important; top: 0 !important; width: 100vw !important; height: 100vh !important; border-radius: 0; }
+    #launch .l-emoji { font-size: 7vmin; }
+    #launch .l-title { font-size: 4vmin; font-weight: 700; font-family: var(--font-mono); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .ticker span { animation: none; }
+      #horizon-rot, .hand, #launch { transition: none; }
+    }
+  </style>
 </head>
 <body>
-<canvas id="scene"></canvas>
 
-<div id="cal" class="hide">
-  <div>
-    <h2 id="cal-title">Waiting for the remote</h2>
-    <p id="cal-body">Open the controller page on your phone and tap Enable motion sensors.</p>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-kart" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.6"/><path d="M12 3v6.4M12 20.6V14.6M3 12h6.4M20.6 12h-6.4"/></symbol>
+    <symbol id="i-blade" viewBox="0 0 24 24"><path d="M4 20 19 5"/><path d="M14 5h5v5"/><path d="M4 11l3 3"/></symbol>
+    <symbol id="i-invader" viewBox="0 0 24 24"><path d="M6 10V8a6 6 0 0 1 12 0v2"/><path d="M4 10h16v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 14h0M16 14h0" stroke-width="2.6"/><path d="M8 20v-2M16 20v-2"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-joy" viewBox="0 0 24 24"><rect x="4" y="9" width="16" height="9" rx="2"/><path d="M8 12v3M6.5 13.5h3"/><circle cx="15" cy="12.5" r="1" fill="currentColor"/><circle cx="17.5" cy="15" r="1" fill="currentColor"/><path d="M12 9V6a2 2 0 0 1 2-2h1"/></symbol>
+  </defs>
+</svg>
+
+<div class="ticker"><span id="ticker-text">connecting&hellip;</span></div>
+
+<div class="wrap">
+  <header class="bar">
+    <div class="wordmark"><span class="led" id="led"></span>SENWII</div>
+    <nav class="links">
+      <a href="#games">GAMES</a>
+      <a href="#how">HOW IT WORKS</a>
+      <a href="#join">JOIN A SESSION</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <div>
+      <span class="tag">LAN RELAY, OPEN SOURCE</span>
+      <h1>Your phone <u>is</u> the remote.<br>Not a keypad for one.</h1>
+      <p class="lede">
+        SenWii reads your phone's raw gyro and accelerometer and turns it into
+        a sword, a wheel, a sight. Aim is rate-based and grip-agnostic, so it
+        stays true whether you hold the phone flat, upright, or sideways,
+        with no calibration step.
+      </p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#join">SCAN TO JOIN</a>
+        <a class="btn btn-ghost" href="#games">BROWSE GAMES</a>
+      </div>
+      <div class="readout-row">
+        <div class="readout"><b id="r-rate">&ndash;</b><span>motion rate</span></div>
+        <div class="readout"><b>4</b><span>controller bays</span></div>
+        <div class="readout"><b>0</b><span>apps installed</span></div>
+      </div>
+    </div>
+
+    <div class="instrument">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="instrument-label"><span id="attitude-label">ATTITUDE, NO SIGNAL</span><span>P1</span></div>
+      <div class="horizon-stage">
+        <svg viewBox="0 0 200 200">
+          <defs><clipPath id="horizon-clip"><circle cx="100" cy="100" r="78"/></clipPath></defs>
+          <circle cx="100" cy="100" r="80" fill="none" stroke="#c9d2e0" stroke-width="2"/>
+          <g clip-path="url(#horizon-clip)">
+            <g id="horizon-rot" transform="translate(100 100)">
+              <rect x="-200" y="-320" width="400" height="320" fill="#bcd7ec"/>
+              <rect x="-200" y="0" width="400" height="320" fill="#ddc9a0"/>
+              <rect x="-200" y="-2" width="400" height="4" fill="#121a2b"/>
+              <g stroke="#121a2b" stroke-width="2" opacity=".7">
+                <line x1="-40" y1="-20" x2="-40" y2="-12"/><line x1="40" y1="-20" x2="40" y2="-12"/>
+                <line x1="-40" y1="20" x2="-40" y2="12"/><line x1="40" y1="20" x2="40" y2="12"/>
+              </g>
+            </g>
+          </g>
+          <circle cx="100" cy="100" r="80" fill="none" stroke="#c9d2e0" stroke-width="10" opacity=".6"/>
+          <g stroke="#c2660a" stroke-width="2.5">
+            <line x1="76" y1="100" x2="92" y2="100"/><line x1="108" y1="100" x2="124" y2="100"/>
+            <path d="M100 100 L92 92 L108 92 Z" fill="#c2660a" stroke="none"/>
+          </g>
+        </svg>
+      </div>
+      <div class="telemetry">
+        <div><b id="t-roll">0&deg;</b><span>ROLL</span></div>
+        <div><b id="t-pitch">0&deg;</b><span>PITCH</span></div>
+        <div><b id="t-rate">&ndash;</b><span>STREAM</span></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-head" id="join">
+    <h2><b>Join a session</b> // 01</h2>
+    <p>One QR for the room. The relay tags every phone with a bay the instant it connects.</p>
   </div>
+  <div class="manifest">
+    <div class="manifest-main">
+      <div class="instrument-label"><span>CONTROLLER LINK</span><span class="status-pill off" id="status-pill"><i></i><span id="status-text">0 connected</span></span></div>
+      <div class="code-row"><span class="code" id="join-url">resolving address&hellip;</span></div>
+      <div class="bays" id="bays">
+        <div class="bay"><i></i><span>P1</span></div>
+        <div class="bay"><i></i><span>P2</span></div>
+        <div class="bay"><i></i><span>P3</span></div>
+        <div class="bay"><i></i><span>P4</span></div>
+      </div>
+    </div>
+    <div class="manifest-stub">
+      <img id="qr" alt="Scan to open the controller page" />
+      <small>SCAN TO<br>JOIN BAY</small>
+    </div>
+  </div>
+
+  <div class="section-head" id="games">
+    <h2><b>Game library</b> // 02</h2>
+    <p>Load a game and every connected phone becomes that game's remote.</p>
+  </div>
+  <div class="cart-list" id="cart-list">
+    <div class="cart-empty">Loading games&hellip;</div>
+  </div>
+
+  <div class="section-head" id="how">
+    <h2><b>How a session works</b> // 03</h2>
+    <p>The relay holds no game state: it's a dumb, low-latency switchboard.</p>
+  </div>
+  <div class="how">
+    <div class="step"><div class="num">[ 01 ]</div><h4>Open the room</h4><p>Load SenWii on the TV or PC browser. It generates a join code and QR instantly, no sign-up.</p></div>
+    <div class="step"><div class="num">[ 02 ]</div><h4>Scan in</h4><p>Each player scans with their phone camera. No install: the page itself becomes the remote.</p></div>
+    <div class="step"><div class="num">[ 03 ]</div><h4>Point and play</h4><p>Point at a game to select it, press A to launch. From there it's swinging, aiming, tilting, for real.</p></div>
+  </div>
+
+  <footer>
+    <span><svg class="icon"><use href="#i-joy"/></svg>SENWII, MOTION-CONTROLLED GAMES FOR THE BROWSER</span>
+    <span>NOT AFFILIATED WITH NINTENDO</span>
+  </footer>
 </div>
 
-
-<div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
-
-<div id="keys">Point with your phone · <b>A</b> selects · <b>B</b> back · <b>←→</b> pointer speed · <b>C</b> re-centre · D debug</div>
 <div id="speed"></div>
 <pre id="debug"></pre>
-
 
 <script src="/socket.io/socket.io.js"></script>
 <script type="module" src="menu.js"></script>
