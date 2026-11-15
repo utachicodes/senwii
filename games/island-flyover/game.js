@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { gripTilt, axesFromSample } from '../../core/orientation.js';
 import {
@@ -108,6 +108,7 @@ function buildRings() {
 // ── Wiring ─────────────────────────────────────────────────────────────────
 let started = false;
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => { if (!started || flight.state === 'done') startFlight(); },
   onSample: (sample) => {
     const tilt = gripTilt(axesFromSample(sample));

@@ -366,7 +366,30 @@ function constructRace() {
   $("pause").hidden = true;
   paused = false;
 }
+// The menu's launch handoff carries its relay room code so phones that
+// already joined from the launcher stay connected through this navigation
+// instead of the new page minting a room nothing has joined yet (see
+// core/net.js and core/splash.js). Read and cleared directly, without
+// core/splash.js's banner — this game already has its own loading screen.
+let launchRoom = null;
+try {
+  const raw = sessionStorage.getItem('senwii.launch');
+  if (raw) {
+    sessionStorage.removeItem('senwii.launch');
+    const data = JSON.parse(raw);
+    if (data && Date.now() - (data.t || 0) < 4000) launchRoom = data.room || null;
+  }
+} catch { /* storage unavailable or payload stale — launch fresh */ }
+
+// The menu reclaims this room on arrival (see public/menu.js) so phones that
+// joined mid-race don't get dropped just for backing out to the menu.
+function exitToMenu(delay = 100) {
+  try { if (link.room) sessionStorage.setItem('senwii.homeRoom', link.room); } catch { /* fine */ }
+  setTimeout(() => { location.href = '/'; }, delay);
+}
+
 const link = new GameLink({
+  room: launchRoom,
   onOrientation: (sample, slot) => {
     if (slot !== 0) return;
     usingPhone = true;
@@ -382,7 +405,7 @@ const link = new GameLink({
     const now = performance.now();
     wheel.command(cmd, now);
     if (cmd.type === "home") {
-      audio.ui('cancel').then(()=>setTimeout(()=>location.href="/",100));
+      audio.ui('cancel').then(() => exitToMenu());
       return;
     }
     if (cmd.type === "recentre" || cmd.type === "calibrate") {
@@ -589,7 +612,7 @@ document.addEventListener('click', e => {
   const button=e.target.closest('button, a');
   if(!button || button.matches('.character,[data-laps],#start,#again,#resume'))return;
   if(button.matches('a[href="/"]')&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey&&!e.altKey){
-    e.preventDefault();audio.ui('cancel').then(()=>setTimeout(()=>location.href='/',100));
+    e.preventDefault();audio.ui('cancel').then(() => exitToMenu());
   }else audio.ui('confirm');
 });
 window.addEventListener("keydown", (e) => {

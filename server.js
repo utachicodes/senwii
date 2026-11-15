@@ -90,15 +90,21 @@ const scheme = tls ? 'https' : 'http';
 const lanIp = localAddresses()[0] || 'localhost';
 const controllerUrl = `${scheme}://${lanIp}:${PORT}/controller`;
 
-// The PC client fetches this to render a scannable join code.
-app.get('/api/pairing', async (_req, res) => {
+// The PC client fetches this to render a scannable join code, once it has a
+// room code from the socket connection (see 'register' below). Without one
+// it falls back to the bare controller URL — still useful for manual typing.
+const ROOM_CODE_RE = /^[A-Z0-9]{3,8}$/;
+app.get('/api/pairing', async (req, res) => {
+  const room = String(req.query.room || '').toUpperCase();
+  const valid = ROOM_CODE_RE.test(room);
+  const url = valid ? `${controllerUrl}?room=${room}` : controllerUrl;
   try {
-    const qr = await QRCode.toDataURL(controllerUrl, {
+    const qr = await QRCode.toDataURL(url, {
       margin: 1,
       width: 320,
       color: { dark: '#0b0e14', light: '#ffffff' },
     });
-    res.json({ url: controllerUrl, qr });
+    res.json({ url, qr, room: valid ? room : null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -115,67 +121,130 @@ const io = new Server(server, {
 /** socket.id → 'game' | 'controller' */
 const roles = new Map();
 
-function countOf(role) {
-  let n = 0;
-  for (const r of roles.values()) if (r === role) n += 1;
-  return n;
-}
-
 /**
- * Player slots. Only slot 0 is used today, but tagging every packet with its
- * slot from the start means adding a second phone later is a feature, not a
- * protocol migration.
+ * A room is one PC + up to MAX_PLAYERS phones. Every game page that connects
+ * gets its own room and its own code — a single `npm start` still behaves
+ * exactly like before (one room, one code), but nothing stops two PCs on the
+ * same LAN (or, once this runs online, two unrelated groups on the same
+ * server) from running concurrent sessions without their packets crossing.
+ *
+ * The server holds no game state *within* a room — see the file banner —
+ * but it does now hold room membership, which is the minimum needed to keep
+ * two sessions' orientation streams from colliding.
  */
 const MAX_PLAYERS = 4;
-const slots = new Array(MAX_PLAYERS).fill(null);   // index → socket.id
+// A page navigation (menu → game) drops the old socket and opens a new one;
+// the new page's GameLink reclaims the menu's room code (see core/net.js and
+// core/splash.js) instead of minting a fresh one, so this window just covers
+// the gap between the old socket's disconnect and the new page's connect.
+const ROOM_RECLAIM_MS = 8000;
+const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L
+const rooms = new Map();        // code → { code, gameSocketId, slots: [socketId|null] }
+const socketRoom = new Map();   // socket.id → room code (both game and controller sockets)
+const roomCloseTimers = new Map();   // code → Timeout, pending while a room's game socket is away
 
-function assignSlot(socketId) {
-  const free = slots.indexOf(null);
+function genRoomCode() {
+  let code;
+  do {
+    code = Array.from({ length: 5 }, () => ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)]).join('');
+  } while (rooms.has(code));
+  return code;
+}
+
+function createRoom(gameSocketId) {
+  const room = { code: genRoomCode(), gameSocketId, slots: new Array(MAX_PLAYERS).fill(null) };
+  rooms.set(room.code, room);
+  return room;
+}
+
+function cancelRoomClose(code) {
+  const timer = roomCloseTimers.get(code);
+  if (timer) {
+    clearTimeout(timer);
+    roomCloseTimers.delete(code);
+  }
+}
+
+function assignSlot(room, socketId) {
+  const free = room.slots.indexOf(null);
   if (free === -1) return -1;
-  slots[free] = socketId;
+  room.slots[free] = socketId;
   return free;
 }
 
-function releaseSlot(socketId) {
-  const i = slots.indexOf(socketId);
-  if (i !== -1) slots[i] = null;
+function releaseSlot(room, socketId) {
+  const i = room.slots.indexOf(socketId);
+  if (i !== -1) room.slots[i] = null;
 }
 
-const slotOf = (socketId) => slots.indexOf(socketId);
+const gameRoomOf = (code) => `room:${code}:game`;
+const controllerRoomOf = (code) => `room:${code}:controller`;
 
-function broadcastPresence() {
-  io.emit('presence', {
-    game: countOf('game'),
-    controller: countOf('controller'),
-    slots: slots.map((id, i) => ({ slot: i, occupied: id !== null })),
+function broadcastPresence(room) {
+  io.to(gameRoomOf(room.code)).to(controllerRoomOf(room.code)).emit('presence', {
+    game: room.gameSocketId ? 1 : 0,
+    controller: room.slots.filter(Boolean).length,
+    slots: room.slots.map((id, i) => ({ slot: i, occupied: id !== null })),
   });
 }
 
 io.on('connection', (socket) => {
-  socket.on('register', (role) => {
-    if (role !== 'game' && role !== 'controller') return;
-    roles.set(socket.id, role);
-    socket.join(role);
+  socket.on('register', (role, payload) => {
+    if (role === 'game') {
+      roles.set(socket.id, 'game');
+      const wantCode = String((payload && payload.room) || '').toUpperCase();
+      const existing = wantCode && rooms.get(wantCode);
+      let room;
+      if (existing) {
+        // Reclaiming the room this socket's previous page (the menu, or an
+        // earlier game) was holding — same code, same phones, new socket.
+        cancelRoomClose(existing.code);
+        existing.gameSocketId = socket.id;
+        room = existing;
+      } else {
+        room = createRoom(socket.id);
+      }
+      socketRoom.set(socket.id, room.code);
+      socket.join(gameRoomOf(room.code));
+      socket.emit('room', { code: room.code });
+      console.log(`[io] game connected, room ${room.code}${existing ? ' (reclaimed)' : ''} (${socket.id})`);
+      broadcastPresence(room);
+      return;
+    }
 
     if (role === 'controller') {
-      const slot = assignSlot(socket.id);
-      if (slot === -1) {
-        socket.emit('slot-denied', { reason: 'all player slots full', max: MAX_PLAYERS });
-        console.log(`[io] controller rejected — ${MAX_PLAYERS} slots full (${socket.id})`);
+      const code = String((payload && payload.room) || '').toUpperCase();
+      const room = rooms.get(code);
+      if (!room) {
+        socket.emit('room-denied', { code });
+        console.log(`[io] controller rejected — unknown room ${code || '(none)'} (${socket.id})`);
         return;
       }
+      const slot = assignSlot(room, socket.id);
+      if (slot === -1) {
+        socket.emit('slot-denied', { reason: 'all player slots full', max: MAX_PLAYERS });
+        console.log(`[io] controller rejected — ${MAX_PLAYERS} slots full in room ${code} (${socket.id})`);
+        return;
+      }
+      roles.set(socket.id, 'controller');
+      socketRoom.set(socket.id, room.code);
+      socket.join(controllerRoomOf(room.code));
       socket.emit('slot', { slot });
-      console.log(`[io] controller connected as player ${slot + 1} (${socket.id})`);
-    } else {
-      console.log(`[io] game connected (${socket.id})`);
+      console.log(`[io] controller connected as player ${slot + 1} in room ${code} (${socket.id})`);
+      broadcastPresence(room);
     }
-    broadcastPresence();
   });
 
   // Latency probe. Echoed straight back so the game can measure a true round
   // trip — a one-way timestamp would need synchronised clocks across devices.
-  socket.on('ping-probe', (data) => socket.to('controller').emit('ping-probe', data));
-  socket.on('pong-probe', (data) => socket.to('game').emit('pong-probe', data));
+  socket.on('ping-probe', (data) => {
+    const code = socketRoom.get(socket.id);
+    if (code) socket.to(controllerRoomOf(code)).emit('ping-probe', data);
+  });
+  socket.on('pong-probe', (data) => {
+    const code = socketRoom.get(socket.id);
+    if (code) socket.to(gameRoomOf(code)).emit('pong-probe', data);
+  });
 
   // Phone → PC.
   //
@@ -187,39 +256,77 @@ io.on('connection', (socket) => {
   // connects, commands work, and the blade simply never moves. The payload is
   // ~100 bytes at 60Hz; the rate cap on the sender is the real backpressure.
   socket.on('orientation', (data) => {
-    socket.to('game').emit('orientation', { ...data, slot: slotOf(socket.id) });
+    const code = socketRoom.get(socket.id);
+    const room = code && rooms.get(code);
+    if (!room) return;
+    socket.to(gameRoomOf(code)).emit('orientation', { ...data, slot: room.slots.indexOf(socket.id) });
   });
 
   socket.on('motion', (data) => {
-    socket.to('game').emit('motion', { ...data, slot: slotOf(socket.id) });
+    const code = socketRoom.get(socket.id);
+    const room = code && rooms.get(code);
+    if (!room) return;
+    socket.to(gameRoomOf(code)).emit('motion', { ...data, slot: room.slots.indexOf(socket.id) });
   });
 
   // Phone → PC control actions: calibrate, start, pause, sensitivity nudges.
   socket.on('command', (data) => {
-    socket.to('game').emit('command', { ...data, slot: slotOf(socket.id) });
+    const code = socketRoom.get(socket.id);
+    const room = code && rooms.get(code);
+    if (!room) return;
+    socket.to(gameRoomOf(code)).emit('command', { ...data, slot: room.slots.indexOf(socket.id) });
   });
 
   // PC → phone feedback: hits (haptics), score, game state.
   //
   // A message with a `slot` goes to that one phone only — e.g. a multiplayer
   // slice should buzz the hand that swung it, not every hand in the lobby.
-  // Anything without a slot broadcasts to every controller, unchanged from
-  // before slots existed — every existing single-player game's feedback
-  // calls omit it, so this is purely additive.
+  // Anything without a slot broadcasts to every controller in the sender's
+  // own room, unchanged from before slots existed — every existing
+  // single-player game's feedback calls omit it, so this is purely additive.
   socket.on('feedback', (data) => {
-    if (typeof data.slot === 'number' && slots[data.slot]) {
-      io.to(slots[data.slot]).emit('feedback', data);
+    const code = socketRoom.get(socket.id);
+    const room = code && rooms.get(code);
+    if (!room) return;
+    if (typeof data.slot === 'number' && room.slots[data.slot]) {
+      io.to(room.slots[data.slot]).emit('feedback', data);
     } else {
-      socket.to('controller').emit('feedback', data);
+      socket.to(controllerRoomOf(code)).emit('feedback', data);
     }
   });
 
   socket.on('disconnect', () => {
     const role = roles.get(socket.id);
     roles.delete(socket.id);
-    releaseSlot(socket.id);
-    if (role) console.log(`[io] ${role} disconnected (${socket.id})`);
-    broadcastPresence();
+    const code = socketRoom.get(socket.id);
+    socketRoom.delete(socket.id);
+    const room = code && rooms.get(code);
+    if (room) {
+      if (role === 'game') {
+        // A navigation (menu → game, or back to the menu) drops this socket
+        // and a new one reclaims the same code almost immediately — if that
+        // already happened, room.gameSocketId no longer points at us, and
+        // the room is alive under the new socket. Only start the grace
+        // timer when this socket is still the one the room thinks it has.
+        if (room.gameSocketId === socket.id) {
+          room.gameSocketId = null;
+          console.log(`[io] game disconnected, room ${code} reclaimable for ${ROOM_RECLAIM_MS}ms (${socket.id})`);
+          const timer = setTimeout(() => {
+            roomCloseTimers.delete(code);
+            if (rooms.get(code) === room && room.gameSocketId === null) {
+              io.to(controllerRoomOf(code)).emit('room-closed');
+              rooms.delete(code);
+              console.log(`[io] room ${code} closed — nothing reclaimed it in time`);
+            }
+          }, ROOM_RECLAIM_MS);
+          roomCloseTimers.set(code, timer);
+        }
+      } else {
+        releaseSlot(room, socket.id);
+        broadcastPresence(room);
+      }
+    }
+    if (role && role !== 'game') console.log(`[io] ${role} disconnected (${socket.id})`);
   });
 });
 

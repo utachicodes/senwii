@@ -19,6 +19,7 @@ export function createChannel({
   onB = null,               // default: HOME chime + fade back to the menu
   onCommand = () => {},
   onSample = null,          // (sample, dt, now) — raw attitude for tilt games
+  room = null,              // reclaim the menu's relay room (see core/splash.js)
 } = {}) {
   const $ = (id) => document.getElementById(id);
   const pointer = new Pointer({});
@@ -29,6 +30,7 @@ export function createChannel({
   let lastSample = null;
 
   const link = new GameLink({
+    room,
     onOrientation: (sample) => {
       const now = performance.now();
       const dt = lastSampleAt ? clamp((now - lastSampleAt) / 1000, 1 / 240, 0.1) : 1 / 60;
@@ -39,7 +41,7 @@ export function createChannel({
     },
     onCommand: (cmd) => {
       if (cmd.type === 'button' && cmd.button === 'A') { audio.unlock(); onA(); }
-      else if (cmd.type === 'button' && cmd.button === 'B') (onB || (() => goHome(audio)))();
+      else if (cmd.type === 'button' && cmd.button === 'B') (onB || (() => goHome(audio, link.room)))();
       else if (cmd.type === 'calibrate' || cmd.type === 'recentre') {
         pointer.recentre();
         onCommand(cmd);              // games with their own neutral re-zero too
@@ -79,7 +81,7 @@ export function createChannel({
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); audio.unlock(); onA(); }
-    else if (k === 'b' || e.key === 'Escape') (onB || (() => goHome(audio)))();
+    else if (k === 'b' || e.key === 'Escape') (onB || (() => goHome(audio, link.room)))();
     else if (k === 'c' || k === 'r') pointer.recentre();
     else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();

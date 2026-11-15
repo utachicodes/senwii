@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { Rally, TABLE, PLAYER_Z, AI_Z } from './logic.js';
@@ -98,6 +98,7 @@ const swing = new SwingDetector({ onThreshold: 120, minTravel: 18 });
 const rally = new Rally({ onEvent: handleEvent });
 
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => { if (rally.state === 'ready' || rally.state === 'over') startGame(); },
   onSample: (sample, dt, now) => {
     const s = swing.update(channel.pointer.rateDps, dt, now);

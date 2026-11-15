@@ -58,7 +58,23 @@ ensureAudio();
 let launching = null;        // { el, t, rect } during the launch zoom
 let latencyMs = null;
 
+// Backing out of a game stashes its room code (see core/splash.js) so
+// returning here reclaims it instead of stranding any phone still connected.
+let homeRoom = null;
+try {
+  homeRoom = sessionStorage.getItem('senwii.homeRoom') || null;
+  sessionStorage.removeItem('senwii.homeRoom');
+} catch { /* storage unavailable */ }
+
 const link = new GameLink({
+  room: homeRoom,
+  onRoom: (code) => {
+    $('join-url').textContent = `room ${code}`;
+    fetch(`/api/pairing?room=${encodeURIComponent(code)}`).then((r) => r.json()).then(({ url, qr }) => {
+      $('qr').src = qr;
+      $('join-url').textContent = url;
+    }).catch(() => { $('join-url').textContent = `room ${code} (pairing unavailable)`; });
+  },
   onOrientation: (sample, slot) => {
     const now = performance.now();
     const inp = inputFor(slot);
@@ -191,6 +207,7 @@ function launch(game, el) {
   try {
     sessionStorage.setItem('senwii.launch', JSON.stringify({
       slug: game.slug, title: game.title, emoji: game.emoji || '\u{1F3AE}', c0, c1, t: Date.now(),
+      room: link.room,
     }));
   } catch { /* storage may be unavailable; the splash just won't carry over */ }
 
@@ -290,11 +307,6 @@ fetch('/api/games').then((r) => r.json()).then((list) => {
   renderGames();
   updateTicker();
 }).catch(() => { games = []; renderGames(); });
-
-fetch('/api/pairing').then((r) => r.json()).then(({ url, qr }) => {
-  $('qr').src = qr;
-  $('join-url').textContent = url;
-}).catch(() => { $('join-url').textContent = 'pairing unavailable'; });
 
 setInterval(() => {
   if (!$('debug').classList.contains('on')) return;

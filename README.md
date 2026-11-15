@@ -32,6 +32,11 @@ and only feeds the launcher card.
 - **Don't reduce the mapping back to raw Euler angles.** Aim is measured in a
   calibrated frame built from the player's actual grip; the naive version breaks
   entirely for anyone holding the phone upright.
+- **A page navigation is a new socket.** Menu → game and game → menu both tear
+  down the old connection and open a new one, so the new page must reclaim the
+  old room code (stashed in `sessionStorage`, see `core/splash.js`) or every
+  phone that already joined gets silently stranded. The server holds a closed
+  room open for 8 seconds specifically for this handoff.
 
 ## Quick start
 
@@ -85,6 +90,12 @@ engine learns each phone's gyro axis conventions from its own data at runtime
 (they genuinely differ between devices), heals drift back toward the true pose
 between swings, and dead-reckons the cursor slightly ahead of the packet
 stream so it never feels laggy.
+
+The relay is room-based: every PC that connects gets its own short join code
+and its own up-to-4 phone slots, so two PCs on the same network (or, run
+online, two unrelated groups on the same server) never see each other's
+packets. The menu's QR and join panel encode that code; the controller page
+reads it from `?room=`.
 
 ## Troubleshooting
 

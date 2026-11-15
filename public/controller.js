@@ -17,6 +17,10 @@
 
 const socket = io({ transports: ['websocket', 'polling'] });
 
+// The PC's QR encodes its room code as ?room=CODE; without one (a bookmarked
+// /controller, or a manual visit) there's nothing to join yet.
+const roomCode = new URLSearchParams(window.location.search).get('room') || '';
+
 const $ = (id) => document.getElementById(id);
 const els = {
   net: $('net'), dotNet: $('dot-net'), hz: $('hz'), player: $('player'),
@@ -116,12 +120,18 @@ function syncLeds() {
 }
 
 socket.on('connect', () => {
-  socket.emit('register', 'controller');
+  if (!roomCode) {
+    setNet('no room code — scan the QR on the PC', 'err');
+    return;
+  }
+  socket.emit('register', 'controller', { room: roomCode });
   setNet('waiting for PC…', '');
   syncLeds();
 });
 socket.on('disconnect', () => { setNet('disconnected', 'err'); gameConnected = false; syncLeds(); });
 socket.on('connect_error', () => setNet('server unreachable', 'err'));
+socket.on('room-denied', () => setNet('that code is no longer valid — rescan the QR', 'err'));
+socket.on('room-closed', () => { gameConnected = false; setNet('the PC closed this session', 'err'); syncLeds(); });
 
 socket.on('presence', ({ game }) => {
   gameConnected = game > 0;

@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import {
@@ -100,6 +100,7 @@ const hole = new Hole({ onEvent: handleEvent });
 let started = false;
 
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => {
     if (!started || hole.state === 'holed') startRound();
   },

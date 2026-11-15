@@ -15,7 +15,7 @@
  * silver. If this page's audio was still policy-blocked, a flag tells the
  * menu to ring the chime on arrival instead — one chime either way.
  */
-export function goHome(audio) {
+export function goHome(audio, room) {
   if (goHome.leaving) return;
   goHome.leaving = true;
   if (audio) {
@@ -30,10 +30,22 @@ export function goHome(audio) {
     + 'transition:opacity .5s ease;z-index:999;pointer-events:none;';
   document.body.appendChild(el);
   requestAnimationFrame(() => { el.style.opacity = '1'; });
-  try { sessionStorage.setItem('senwii.home', String(Date.now())); } catch { /* fine */ }
+  try {
+    sessionStorage.setItem('senwii.home', String(Date.now()));
+    // The menu reclaims this room on arrival (see public/menu.js) so phones
+    // that joined mid-game don't get dropped just for backing out to it.
+    if (room) sessionStorage.setItem('senwii.homeRoom', room);
+  } catch { /* fine */ }
   setTimeout(() => { window.location.href = '/'; }, 950);
 }
 
+/**
+ * Returns the stashed launch payload (slug/title/emoji/colors/room) so the
+ * game can also recover the menu's room code, or undefined if there was
+ * none to consume. The splash visual is a side effect; the return value is
+ * what lets the game reclaim the same relay room instead of minting a new
+ * one and stranding every phone that already joined it.
+ */
 export function consumeLaunchSplash() {
   let data;
   try {
@@ -63,4 +75,6 @@ export function consumeLaunchSplash() {
     el.style.opacity = '0';
     setTimeout(() => el.remove(), 450);
   }, 300);
+
+  return data;
 }

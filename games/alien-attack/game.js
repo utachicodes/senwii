@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { axesFromSample } from '../../core/orientation.js';
 import {
@@ -354,6 +354,7 @@ let steerFilter = new SteerFilter();
 let captureNotBefore = 0;            // boot grace: time to lay the phone flat
 
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => {
     if (!started || game.state === 'done') { startRun(); return; }
     if (game.shoot(performance.now())) {

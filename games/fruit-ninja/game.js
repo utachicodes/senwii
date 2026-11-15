@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash, goHome } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { FruitNinja, FIELD_H } from './logic.js';
 import { Pointer } from '../../core/pointer.js';
 import { saveSensitivity, loadSensitivity } from '../../core/calibration.js';
@@ -917,6 +917,7 @@ function recentreSlot(slot) {
 }
 
 const link = new GameLink({
+  room: launchData?.room,
   onOrientation: (sample, slot) => {
     const now = performance.now();
     const inp = inputFor(slot);
@@ -929,7 +930,7 @@ const link = new GameLink({
     else if (cmd.type === 'start') beginPlay();
     else if (cmd.type === 'button' && cmd.button === 'A') beginPlay();
     // B returns to the menu, so the whole loop is reachable from the phone.
-    else if (cmd.type === 'button' && cmd.button === 'B') goHome(audio);
+    else if (cmd.type === 'button' && cmd.button === 'B') goHome(audio, link.room);
     else if (cmd.type === 'speed') {
       const inp = inputFor(slot);
       inp.pointer.sensitivity = clamp(inp.pointer.sensitivity * (cmd.factor || 1), 0.2, 6);

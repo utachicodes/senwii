@@ -6,14 +6,26 @@
  * start cost nothing now and don't need rewriting when a second phone appears.
  */
 export class GameLink {
-  constructor({ onOrientation, onCommand, onPresence } = {}) {
+  /**
+   * `room`: a code to reclaim (from the menu's launch handoff via
+   * core/splash.js) rather than mint a fresh one. Passing the menu's room
+   * code is what keeps phones that already joined from the launcher
+   * connected straight through into the game instead of the navigation
+   * stranding them in a room nothing is listening to anymore.
+   */
+  constructor({ onOrientation, onCommand, onPresence, onRoom, room } = {}) {
     // eslint-disable-next-line no-undef
     this.socket = io({ transports: ['websocket', 'polling'] });
     this.controllers = 0;
     this.slots = [];
     this.rate = 0;
+    this.room = null;   // this session's join code, set once the server replies
 
-    this.socket.on('connect', () => this.socket.emit('register', 'game'));
+    this.socket.on('connect', () => this.socket.emit('register', 'game', room ? { room } : undefined));
+    this.socket.on('room', ({ code }) => {
+      this.room = code;
+      if (onRoom) onRoom(code);
+    });
 
     let samples = 0;
     let mark = performance.now();

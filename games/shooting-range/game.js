@@ -1,7 +1,7 @@
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import {
   Range, FIELD_W, FIELD_H, ROUND_MS, GOLD_POINTS, BOMB_PENALTY,
@@ -241,6 +241,7 @@ function drawStar(x, y, r, color, alpha) {
 
 // ── Wiring ─────────────────────────────────────────────────────────────────
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => {
     if (!started || range.state === 'done') { startRound(); return; }
     fire();

@@ -2,7 +2,7 @@ import * as THREE from '/vendor/three/three.module.js';
 import { consumeLaunchSplash } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
-consumeLaunchSplash();
+const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { axesFromSample, clamp } from '../../core/orientation.js';
@@ -120,6 +120,7 @@ let swingFlash = 0;
 const duel = new Duel({ onEvent: handleEvent });
 
 const channel = createChannel({
+  room: launchData?.room,
   onA: () => {
     if (duel.state === 'ready' || duel.state === 'over') startMatch();
   },
