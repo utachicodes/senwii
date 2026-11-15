@@ -31,11 +31,22 @@ jobs:
           echo "decoded key size: $(wc -c < "$RUNNER_TEMP/deploy_key") bytes"
           grep -q "BEGIN OPENSSH PRIVATE KEY" "$RUNNER_TEMP/deploy_key" || { echo "::error::decoded file is not a valid OpenSSH private key — check the VPS_SSH_KEY_B64 secret"; exit 1; }
 
+      # Confirmed root cause of the earlier auth failures: VPS_USER had a
+      # trailing newline from copy-pasting a code block, so sshd actually
+      # saw the username "root\n" — an invalid user, rejected before the
+      # key was even checked. Trim every connection secret the same way,
+      # not just the key, so this class of paste mistake can't recur.
+      - name: Normalize connection secrets
+        id: conn
+        run: |
+          echo "host=$(printf '%s' "${{ secrets.VPS_HOST }}" | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+          echo "user=$(printf '%s' "${{ secrets.VPS_USER }}" | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
+          host: ${{ steps.conn.outputs.host }}
+          username: ${{ steps.conn.outputs.user }}
           key_path: ${{ runner.temp }}/deploy_key
           script: |
             set -e
