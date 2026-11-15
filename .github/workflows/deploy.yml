@@ -16,12 +16,20 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      # VPS_SSH_KEY_B64 is the private key, base64-encoded to one line —
+      # multi-line secrets are easy to mangle via copy-paste in GitHub's
+      # secret box (that's what broke the first attempt at this).
+      - name: Decode deploy key
+        run: |
+          echo "${{ secrets.VPS_SSH_KEY_B64 }}" | base64 -d > "$RUNNER_TEMP/deploy_key"
+          chmod 600 "$RUNNER_TEMP/deploy_key"
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          key_path: ${{ runner.temp }}/deploy_key
           script: |
             set -e
             cd /opt/senwii
