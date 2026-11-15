@@ -18,11 +18,18 @@ jobs:
     steps:
       # VPS_SSH_KEY_B64 is the private key, base64-encoded to one line —
       # multi-line secrets are easy to mangle via copy-paste in GitHub's
-      # secret box (that's what broke the first attempt at this).
+      # secret box (that broke the first two attempts at this: a stray
+      # line-wrap newline landed inside the base64 payload). Stripping every
+      # whitespace character before decoding makes this immune to that no
+      # matter how the paste reflows it, and the grep after is a loud,
+      # key-safe check that decoding actually produced a real key instead of
+      # failing silently into an empty/garbage file.
       - name: Decode deploy key
         run: |
-          echo "${{ secrets.VPS_SSH_KEY_B64 }}" | base64 -d > "$RUNNER_TEMP/deploy_key"
+          echo "${{ secrets.VPS_SSH_KEY_B64 }}" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/deploy_key"
           chmod 600 "$RUNNER_TEMP/deploy_key"
+          echo "decoded key size: $(wc -c < "$RUNNER_TEMP/deploy_key") bytes"
+          grep -q "BEGIN OPENSSH PRIVATE KEY" "$RUNNER_TEMP/deploy_key" || { echo "::error::decoded file is not a valid OpenSSH private key — check the VPS_SSH_KEY_B64 secret"; exit 1; }
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
