@@ -24,9 +24,16 @@ const { ensureCert, localAddresses } = require('./scripts/gen-cert');
 
 const PORT = Number(process.env.PORT) || 8443;
 const FORCE_HTTP = process.env.HTTP === '1';
+// Set when a platform's own edge (Fly.io, Render, Railway, nginx, ...)
+// terminates TLS and forwards plain HTTP: this process serves HTTP (no local
+// cert to manage) and trusts that edge's X-Forwarded-* headers instead of
+// generating a self-signed cert for a LAN no one here is actually on. See
+// README's "Running online" section for the two or three env vars this needs.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const GAMES_DIR = path.join(__dirname, 'games');
 
 const app = express();
+if (TRUST_PROXY) app.set('trust proxy', 1);
 // no-cache (NOT no-store): browsers must revalidate every file against its
 // ETag on each load, so a plain reload after a git pull always runs current
 // code — while unchanged files still come back as cheap 304s. Heuristic
@@ -83,12 +90,28 @@ app.get('/api/games', (_req, res) => res.json(listGames()));
 const BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 app.get('/api/session', (_req, res) => res.json({ bootId: BOOT_ID }));
 
-const tls = FORCE_HTTP ? null : ensureCert();
+// Behind a trusted edge, that edge holds the real cert — this process just
+// speaks plain HTTP on PORT, same as FORCE_HTTP's local dev path, but without
+// FORCE_HTTP's "sensors won't work" caveat (the public URL genuinely is
+// HTTPS; only the hop from the edge to here is plain).
+const tls = (FORCE_HTTP || TRUST_PROXY) ? null : ensureCert();
 const server = tls ? https.createServer(tls, app) : http.createServer(app);
-const scheme = tls ? 'https' : 'http';
+const scheme = tls || TRUST_PROXY ? 'https' : 'http';
 
 const lanIp = localAddresses()[0] || 'localhost';
 const controllerUrl = `${scheme}://${lanIp}:${PORT}/controller`;
+
+/**
+ * The base URL phones should use to reach this server. On a LAN this is the
+ * scanned local IP; behind a reverse proxy there's no such thing — the only
+ * correct source is the request's own Host header (which `trust proxy` above
+ * makes `req.get('host')`/`req.protocol` reflect the public hostname/scheme,
+ * not this process's local plain-HTTP view of itself).
+ */
+function publicBaseUrl(req) {
+  if (TRUST_PROXY) return `${req.protocol}://${req.get('host')}`;
+  return `${scheme}://${lanIp}:${PORT}`;
+}
 
 // The PC client fetches this to render a scannable join code, once it has a
 // room code from the socket connection (see 'register' below). Without one
@@ -97,7 +120,8 @@ const ROOM_CODE_RE = /^[A-Z0-9]{3,8}$/;
 app.get('/api/pairing', async (req, res) => {
   const room = String(req.query.room || '').toUpperCase();
   const valid = ROOM_CODE_RE.test(room);
-  const url = valid ? `${controllerUrl}?room=${room}` : controllerUrl;
+  const base = `${publicBaseUrl(req)}/controller`;
+  const url = valid ? `${base}?room=${room}` : base;
   try {
     const qr = await QRCode.toDataURL(url, {
       margin: 1,
@@ -335,12 +359,19 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n${line}`);
   console.log('  🕹  SenWii — your phone is the remote');
   console.log(line);
-  console.log(`  Launcher      ${scheme}://localhost:${PORT}/`);
-  console.log(`  Phone remote  ${controllerUrl}`);
+  if (TRUST_PROXY) {
+    console.log(`  Listening     http://0.0.0.0:${PORT} (plain HTTP — behind a TLS-terminating edge)`);
+  } else {
+    console.log(`  Launcher      ${scheme}://localhost:${PORT}/`);
+    console.log(`  Phone remote  ${controllerUrl}`);
+  }
   const games = listGames();
   console.log(`\n  ${games.length} game${games.length === 1 ? '' : 's'}:`);
   for (const g of games) console.log(`    ${g.emoji}  ${g.title}  →  ${g.url}`);
-  if (!tls) {
+  if (TRUST_PROXY) {
+    console.log('\n  ☁  TRUST_PROXY mode: pairing URLs are built from each request\'s');
+    console.log('     own Host header, not a scanned LAN address.');
+  } else if (!tls) {
     console.log('\n  ⚠  Running plain HTTP. Phone sensors will NOT work off');
     console.log('     localhost — browsers gate the IMU behind a secure context.');
   } else {

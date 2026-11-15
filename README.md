@@ -82,11 +82,13 @@ play.
 | [Fruit Ninja](games/fruit-ninja/) | Swing to slice fruit, dodge bombs and build combos. | Up to 4 |
 | [Alien Attack](games/alien-attack/) | Tilt to fly and press A to fire. | 1 |
 | [Shooting Range](games/shooting-range/) | Point and press A to hit targets against the clock. | 1 |
+| [Bowling](games/bowling/) | Point down the lane, swing to release. Ten frames, standard scoring. | 1 |
+| [Boxing](games/boxing/) | Guard high or low, swing up or down to punch. First to 3 clean hits. | 1 |
+| [Air Hockey](games/air-hockey/) | Point to move your mallet. Defend your goal, pot the puck in theirs. | 1 |
 
-Golf, Table Tennis, Swordplay, Kart Time Trial, Island Flyover, Bowling,
-Boxing and Air Hockey exist under `games/` but are marked `hidden` in their
-`game.json` — in active development, reachable by direct URL, not yet on the
-launcher menu.
+Golf, Table Tennis, Swordplay, Kart Time Trial and Island Flyover exist under
+`games/` but are marked `hidden` in their `game.json` — in active development,
+reachable by direct URL, not yet on the launcher menu.
 
 ## How it works
 
@@ -111,6 +113,37 @@ and its own up-to-4 phone slots, so two PCs on the same network (or, run
 online, two unrelated groups on the same server) never see each other's
 packets. The menu's QR and join panel encode that code; the controller page
 reads it from `?room=`.
+
+## Running online
+
+`npm start`'s self-signed cert and LAN IP scan are a local-play convenience —
+they don't mean anything once this isn't running on your own network. For a
+public deployment, a platform's own edge (Fly.io, Render, Railway, an nginx
+box you run yourself) terminates real TLS and forwards plain HTTP to the
+container; set `TRUST_PROXY=1` and the server adapts:
+
+- It skips `ensureCert()` entirely and just serves HTTP on `PORT` — there's no
+  LAN to generate a cert for.
+- `app.set('trust proxy', 1)` so Express reads the edge's `X-Forwarded-*`
+  headers instead of this process's own (plain-HTTP) view of itself.
+- `/api/pairing`'s QR and join URL are built from the *request's* own `Host`
+  header and protocol, not a scanned LAN address — the only thing that's
+  actually correct once "the server" and "the network phones are on" aren't
+  the same LAN anymore.
+
+A `Dockerfile` and `fly.toml` are included — `fly launch` (after renaming
+`app` in `fly.toml`) or an equivalent Render/Railway service pointed at the
+same Dockerfile both work, since neither needs anything beyond `TRUST_PROXY`
+and `PORT`. Sensors need a genuinely secure context, same as local HTTPS —
+double-check the platform's default domain/cert actually serves HTTPS before
+expecting phones to connect.
+
+What this doesn't change: the relay is still a single in-memory process (see
+"How it works") — `rooms`/`roles`/`socketRoom` all live in one Node process's
+memory, so this deploys as **one instance**, not a horizontally-scaled
+fleet, until that state moves to something shared (Redis, etc.). For a
+friend-group game night this is the right amount of infrastructure; for
+anything bigger it's the next thing to build.
 
 ## Troubleshooting
 

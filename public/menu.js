@@ -21,6 +21,9 @@ const ICONS = {
   'fruit-ninja': 'i-blade',
   'alien-attack': 'i-invader',
   'shooting-range': 'i-target',
+  bowling: 'i-pin',
+  boxing: 'i-glove',
+  'air-hockey': 'i-puck',
 };
 const iconFor = (slug) => ICONS[slug] || 'i-joy';
 

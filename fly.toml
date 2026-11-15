@@ -1,0 +1,31 @@
+# Fly.io config — one option for "Running online" (see README). Not the only
+# one: Render/Railway work from the same Dockerfile with their own env-var
+# UI instead of this file. Rename `app` before the first `fly launch`.
+app = "senwii"
+primary_region = "iad"
+
+[build]
+
+[env]
+  TRUST_PROXY = "1"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  # Websockets live longer than a typical HTTP request; keep the connection
+  # recognised as healthy traffic rather than an idle one Fly recycles.
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
