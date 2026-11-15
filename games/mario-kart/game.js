@@ -899,6 +899,12 @@ const basis = new THREE.Matrix4(),
   basisX = new V(),
   basisY = new V(),
   basisZ = new V();
+// Scratch for the jump-landing orientation blend below — reused instead of
+// allocated fresh every frame for every airborne racer (ramps/boost pads are
+// exactly where karts are airborne most, so this was the one per-frame
+// allocation in the whole racer loop, and the one place framerate dipped).
+const jumpEuler = new THREE.Euler(),
+  jumpQuat = new THREE.Quaternion();
 const frameTimes = [];
 let previousDrawTime = 0;
 let initializedCamera = false;
@@ -926,8 +932,9 @@ function draw(dt, now) {
       const n = r.surfaceNormal||path.normal;
       k.root.position.set(r.x+n.x*(hop+.1),r.y+n.y*(hop+.1),r.z+n.z*(hop+.1));
     }
+    let frame = null;
     if (!r.gliding) {
-      const frame = roadFrame(r.s, r.lateral, r.heading, r.surfaceForward, r.surfaceNormal);
+      frame = roadFrame(r.s, r.lateral, r.heading, r.surfaceForward, r.surfaceNormal);
       basisX.set(frame.right.x, frame.right.y, frame.right.z);
       basisY.set(frame.up.x, frame.up.y, frame.up.z);
       basisZ.set(-frame.forward.x, -frame.forward.y, -frame.forward.z);
@@ -949,8 +956,9 @@ function draw(dt, now) {
     }
     if(r.jump){
       if(!k.wasJumping)k.jumpOrientation=k.root.quaternion.clone();
-      const flat=new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.atan2(r.jump.velocity,Math.max(20,r.speed)),-r.heading,0,'YXZ'));
-      k.root.quaternion.slerpQuaternions(k.jumpOrientation,flat,THREE.MathUtils.smoothstep(r.jump.age,0,.16));
+      jumpEuler.set(-Math.atan2(r.jump.velocity,Math.max(20,r.speed)),-r.heading,0,'YXZ');
+      jumpQuat.setFromEuler(jumpEuler);
+      k.root.quaternion.slerpQuaternions(k.jumpOrientation,jumpQuat,THREE.MathUtils.smoothstep(r.jump.age,0,.16));
     }
     k.wasJumping=!!r.jump;
     if(r.landing>0)k.root.position.y-=Math.sin((1-r.landing/.24)*Math.PI)*.16;
@@ -989,7 +997,10 @@ function draw(dt, now) {
       k.shadow.quaternion.copy(k.root.quaternion);
       k.shadow.rotateX(-Math.PI / 2);
     } else k.shadow.rotation.set(-Math.PI / 2, 0, r.heading);
-    effects.tire(r,roadFrame(r.s,r.lateral,r.heading,r.surfaceForward,r.surfaceNormal),paused?0:dt);
+    // Reuse the frame already computed above for orientation — tire() bails
+    // out immediately on r.gliding (where frame is null) before touching it,
+    // same as before, just without paying for roadFrame() a second time.
+    effects.tire(r,frame,paused?0:dt);
   }
   effects.update(paused?0:dt,innerHeight);
   for (const [i, m] of coinMeshes.entries()) {
