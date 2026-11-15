@@ -90,8 +90,6 @@ npm run test:kart-public
 The public browser check verifies the bundled models, source course, fonts, and
 sample audio, then drives a complete race through the finish/results/restart flow.
 `npm run test:kart-fallback` separately verifies play without the runtime pack.
-`REPORT.md`, `VISUAL-REPORT.md` and iteration notes record development history;
-their local evidence links and earlier test counts are not release requirements.
 
 This is an independent fan project, not an official Nintendo game or emulator.
 The repository's MIT license covers its software, not Nintendo or other

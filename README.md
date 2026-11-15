@@ -10,6 +10,20 @@ Motion-controlled games for the browser — your phone is the remote. A
 Node/Socket.io relay streams phone IMU data over the LAN to a game running on
 the PC.
 
+## Why this and not another phone-as-controller app
+
+Most "scan a QR, phone is the controller" setups use the phone as a keypad —
+buttons and taps forwarded over the network. SenWii reads the phone's actual
+gyro and accelerometer and turns the motion itself into the input: a swing is
+a swing, a tilt is a tilt, not a button mapped to one.
+
+That only works if it works for everyone holding the phone differently, so
+the pointer engine (`core/pointer.js`) learns each device's gyro-axis
+convention from its own data at runtime rather than assuming one — the same
+swing reads correctly whether the phone's flat, upright, or sideways, with no
+calibration screen. No app to install either: the controller is a web page,
+same as the game.
+
 ## Layout
 
 ```
@@ -69,9 +83,10 @@ play.
 | [Alien Attack](games/alien-attack/) | Tilt to fly and press A to fire. | 1 |
 | [Shooting Range](games/shooting-range/) | Point and press A to hit targets against the clock. | 1 |
 
-Golf, Table Tennis, Swordplay, Kart Time Trial and Island Flyover exist under
-`games/` but are marked `hidden` in their `game.json` — in active development,
-reachable by direct URL, not yet on the launcher menu.
+Golf, Table Tennis, Swordplay, Kart Time Trial, Island Flyover, Bowling,
+Boxing and Air Hockey exist under `games/` but are marked `hidden` in their
+`game.json` — in active development, reachable by direct URL, not yet on the
+launcher menu.
 
 ## How it works
 

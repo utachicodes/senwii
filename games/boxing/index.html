@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Boxing — SenWii</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; cursor: none;
+    background: #2a2117; color: #f2ece2;
+    font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+  }
+  canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  #hud { position: absolute; inset: 0; pointer-events: none; padding: 26px 32px; }
+  .score {
+    position: absolute; top: 26px; font-size: 30px; letter-spacing: 6px;
+    text-shadow: 0 2px 8px #0006; font-weight: 800;
+  }
+  #p-score { left: 32px; color: #ffb000; }
+  #a-score { right: 32px; color: #e2432f; }
+  .tag { position: absolute; top: 66px; font-size: 12px; font-weight: 700;
+         letter-spacing: .14em; color: #cbbfa9; text-transform: uppercase; }
+  #p-tag { left: 34px; } #a-tag { right: 34px; }
+
+  #guard {
+    position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%);
+    display: flex; flex-direction: column; gap: 4px; width: 92px;
+  }
+  #guard div { padding: 6px 0; text-align: center; font-size: 11px; font-weight: 700;
+    letter-spacing: .08em; border: 1px solid #ffffff33; border-radius: 6px; color: #cbbfa9; }
+  #guard .on { background: #ffb00033; border-color: #ffb000; color: #ffb000; }
+
+  #banner {
+    position: absolute; left: 50%; top: 24%; transform: translateX(-50%) scale(0.9);
+    font-size: 54px; font-weight: 900; letter-spacing: -0.02em; color: #fff;
+    text-shadow: 0 4px 18px #0008; opacity: 0; transition: all .15s ease;
+    white-space: nowrap;
+  }
+  #banner.on { opacity: 1; transform: translateX(-50%) scale(1); }
+
+  #keys {
+    position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    font-size: 11px; color: #cbbfa9; letter-spacing: .02em;
+  }
+  #keys a { color: inherit; pointer-events: auto; }
+  #link {
+    position: absolute; right: 30px; bottom: 24px; display: flex; align-items: center;
+    gap: 9px; font-size: 13px; color: #cbbfa9; background: #00000040;
+    border: 1px solid #ffffff22; padding: 9px 14px; border-radius: 999px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #6a5f4d; }
+  .dot.on { background: #35d07f; }
+  #debug {
+    position: absolute; right: 30px; top: 96px; margin: 0; display: none;
+    background: #00000066; border: 1px solid #ffffff22; border-radius: 12px;
+    padding: 13px 15px; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #e8dfce;
+    white-space: pre;
+  }
+  #debug.on { display: block; }
+
+  #overlay {
+    position: absolute; inset: 0; display: grid; place-items: center; z-index: 5;
+    background: radial-gradient(ellipse at 50% 40%, #3a2e1fee, #2a2117f5 70%);
+  }
+  #overlay.hide { display: none; }
+  .panel { text-align: center; max-width: 560px; padding: 0 30px; }
+  .panel h1 { font-size: 56px; margin: 0 0 8px; letter-spacing: -0.04em; font-weight: 800; }
+  .panel h1 em { font-style: normal;
+    background: linear-gradient(120deg, #ffb000, #e2432f);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .panel p { color: #d8cdb8; margin: 0 auto 24px; max-width: 430px; }
+  .cta { font-size: 14px; color: #d8cdb8; }
+  .cta strong { color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="score" id="p-score">○○○</div><div class="tag" id="p-tag">You</div>
+  <div class="score" id="a-score">○○○</div><div class="tag" id="a-tag">Rival</div>
+  <div id="guard"><div id="guard-high">GUARD HIGH</div><div id="guard-low">GUARD LOW</div></div>
+  <div id="banner"></div>
+  <div id="keys"><a href="/">← Games</a> · <b>A</b>/Space start · swing up/down to punch high/low ·
+    tilt up/down to guard · <b>D</b> debug</div>
+  <div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
+  <pre id="debug"></pre>
+</div>
+
+<div id="overlay">
+  <div class="panel" id="panel">
+    <h1>🥊 <em>Boxing</em></h1>
+    <p>Hold the phone tilted back to guard your head, tilted forward to guard
+       your body. Swing up for a high punch, down for a body shot — land one
+       the rival isn't guarding. First to three clean hits wins.</p>
+    <div class="cta"><strong>A</strong> or <strong>Space</strong> to fight · <strong>B</strong> menu</div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="game.js"></script>
+</body>
+</html>
