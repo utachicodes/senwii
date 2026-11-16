@@ -7,7 +7,7 @@ import {orientSourceScreen,loadSourceTvBrand} from './source-screens.js';
 import {sourceCrowd} from './source-crowd.js';
 import {sourceHelperMaterial} from './source-visible.js';
 import {finishSourceFiltering,finishSourceAsphalt,finishSourceLights} from './source-materials.js';
-export async function loadSourceWorld(scene, descriptor = {model:'stadium-source.glb',route:'stadium-route.json'}) {
+export async function loadSourceWorld(scene, descriptor = {model:'stadium-source.glb',route:'stadium-route.json'}, abandoned = () => false) {
   const local = file => {
     const url = new URL(file, location.origin+'/assets/mario-kart/');
     if(url.origin!==location.origin||!url.pathname.startsWith('/assets/mario-kart/'))throw new Error('Course files must belong to the local asset pack');
@@ -37,6 +37,9 @@ export async function loadSourceWorld(scene, descriptor = {model:'stadium-source
   const statue=new THREE.Group();statue.userData.finishedModel=true;
   const avoidCamera=surfaceCameraCollision(root);
   const crowd=sourceCrowd(root);
+  // The caller gave up waiting and is already racing on the built-in course
+  // (slow connection): never bolt a second track onto that scene.
+  if(abandoned())throw new Error('Course load abandoned after timeout');
   scene.add(root);
   return {world:root,source:true,route,lights:[],fireworks:[],statue,screenMaterials,avoidCamera,tvBrand,update(t){crowd.update(t);tvBrand?.update(t);}};
 }

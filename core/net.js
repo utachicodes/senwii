@@ -21,7 +21,13 @@ export class GameLink {
     this.rate = 0;
     this.room = null;   // this session's join code, set once the server replies
 
-    this.socket.on('connect', () => this.socket.emit('register', 'game', room ? { room } : undefined));
+    // On a reconnect (flaky network), re-claim the room this page already
+    // holds rather than minting a new one: a fresh code means a new QR and
+    // every joined phone silently stranded in the old room.
+    this.socket.on('connect', () => {
+      const claim = this.room || room;
+      this.socket.emit('register', 'game', claim ? { room: claim } : undefined);
+    });
     this.socket.on('room', ({ code }) => {
       this.room = code;
       if (onRoom) onRoom(code);

@@ -177,8 +177,21 @@ if (coursePreference !== '0') {
 if (!courseDescriptor && coursePreference === '1') courseDescriptor = {model:'stadium-source.glb',route:'stadium-route.json'};
 let world;
 if (courseDescriptor) {
-  try { world = await loadSourceWorld(scene, courseDescriptor); }
-  catch (error) { console.warn('Local course pack unavailable; using built-in course:', error.message); }
+  // The stadium is ~50MB, and this top-level await blocks everything below,
+  // including the GameLink the phone talks to. Online over a slow link that
+  // read as "won't start" plus a dead remote. Wait a bounded time, then race
+  // on the built-in course; the download keeps going in the background and
+  // is cached (see ASSET_CACHE in server.js), so the next visit gets the
+  // stadium. ?courseWait=<ms> overrides the budget (tests, slow devices).
+  const budget = Number(new URLSearchParams(location.search).get('courseWait')) || 12000;
+  let gaveUp = false;
+  const timeout = new Promise((resolve) => setTimeout(() => { gaveUp = true; resolve(null); }, budget));
+  const load = loadSourceWorld(scene, courseDescriptor, () => gaveUp);
+  load.catch(() => {});   // a load abandoned after the timeout rejects later; nothing to do
+  try {
+    world = await Promise.race([load, timeout]);
+    if (!world) console.warn(`Stadium still downloading after ${budget}ms; racing on the built-in course this time.`);
+  } catch (error) { console.warn('Local course pack unavailable; using built-in course:', error.message); }
 }
 if (!world) world = buildWorld(scene);
 if (world.source) {
