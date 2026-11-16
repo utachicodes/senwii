@@ -119,18 +119,40 @@ function syncLeds() {
   }
 }
 
+// After a server restart (any deploy) the phone usually reconnects before
+// the PC's page does, and its room doesn't exist yet. Keep knocking for a
+// while instead of giving up on the first "no such room".
+const ROOM_RETRY_MS = 2000;
+const ROOM_RETRY_FOR_MS = 60000;
+let deniedSince = 0;
+let retryTimer = 0;
+
 socket.on('connect', () => {
   if (!roomCode) {
     setNet('no room code — scan the QR on the PC', 'err');
     return;
   }
+  clearTimeout(retryTimer);
+  deniedSince = 0;
   socket.emit('register', 'controller', { room: roomCode });
   setNet('waiting for PC…', '');
   syncLeds();
 });
 socket.on('disconnect', () => { setNet('disconnected', 'err'); gameConnected = false; syncLeds(); });
 socket.on('connect_error', () => setNet('server unreachable', 'err'));
-socket.on('room-denied', () => setNet('that code is no longer valid — rescan the QR', 'err'));
+socket.on('room-denied', () => {
+  const now = Date.now();
+  if (!deniedSince) deniedSince = now;
+  if (now - deniedSince > ROOM_RETRY_FOR_MS) {
+    setNet('that code is no longer valid — rescan the QR', 'err');
+    return;
+  }
+  setNet('waiting for PC to reconnect…', '');
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => {
+    if (socket.connected) socket.emit('register', 'controller', { room: roomCode });
+  }, ROOM_RETRY_MS);
+});
 socket.on('room-closed', () => { gameConnected = false; setNet('the PC closed this session', 'err'); syncLeds(); });
 
 socket.on('presence', ({ game }) => {
@@ -146,6 +168,7 @@ socket.on('ping-probe', ({ id }) => socket.emit('pong-probe', { id }));
 
 let playerSlot = null;
 socket.on('slot', ({ slot }) => {
+  deniedSince = 0;
   playerSlot = slot;
   els.player.textContent = `P${slot + 1}`;
   els.player.classList.remove('hide');
@@ -403,16 +426,37 @@ async function requestSensors() {
  * are best-effort because iOS Safari implements neither (there the OS
  * Control Centre rotation lock is the only option).
  */
-async function lockUpright() {
+/**
+ * Browsers only grant fullscreen synchronously inside a tap, so this must be
+ * called BEFORE any await in a gesture handler. It used to run after the
+ * motion-permission await, by which point the tap had expired and the
+ * request was silently refused. iPhone Safari has no element fullscreen at
+ * all (iPad has the webkit-prefixed one), so this is a no-op there.
+ */
+function enterFullscreen() {
+  const el = document.documentElement;
+  if (document.fullscreenElement || document.webkitFullscreenElement) return Promise.resolve();
   try {
-    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-      await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
-    }
+    if (el.requestFullscreen) return el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+    if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); return Promise.resolve(); }
+  } catch { /* refused */ }
+  return Promise.resolve();
+}
+
+async function lockUpright(fullscreen = enterFullscreen()) {
+  try {
+    await fullscreen;
     if (screen.orientation && screen.orientation.lock) {
       if (!wheelMode) await screen.orientation.lock('portrait');
     }
   } catch { /* unsupported (iOS) or denied — the phone's own lock still works */ }
 }
+
+// Swiping out of fullscreen mid-game shouldn't be permanent: the next press
+// anywhere on the remote is a fresh tap, so it can take it back.
+els.remote.addEventListener('pointerdown', () => {
+  if (streaming) enterFullscreen();
+});
 
 /**
  * What to actually do with this thing, shown once per device: granting
@@ -435,6 +479,8 @@ function showFirstPlayHint() {
 }
 
 els.enable.addEventListener('click', async () => {
+  // First, while this tap still counts as a user gesture (see enterFullscreen).
+  const fullscreen = enterFullscreen();
   els.enable.disabled = true;
   phoneAudioUnlock();
   try {
@@ -446,7 +492,7 @@ els.enable.addEventListener('click', async () => {
     buzz([10, 40, 18]);
     speakerTalk(400);
     keepAwake();
-    lockUpright();
+    lockUpright(fullscreen);
     showFirstPlayHint();
     // Zero the mapping the moment the sword goes live.
     socket.emit('command', { type: 'calibrate' });

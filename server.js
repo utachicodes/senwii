@@ -184,8 +184,8 @@ function genRoomCode() {
   return code;
 }
 
-function createRoom(gameSocketId) {
-  const room = { code: genRoomCode(), gameSocketId, slots: new Array(MAX_PLAYERS).fill(null) };
+function createRoom(gameSocketId, code = genRoomCode()) {
+  const room = { code, gameSocketId, slots: new Array(MAX_PLAYERS).fill(null) };
   rooms.set(room.code, room);
   return room;
 }
@@ -235,7 +235,11 @@ io.on('connection', (socket) => {
         existing.gameSocketId = socket.id;
         room = existing;
       } else {
-        room = createRoom(socket.id);
+        // Rooms live in memory, so a server restart (every deploy) wipes
+        // them while pages and phones are still open. A game page that
+        // reconnects asking for its old code gets that code back, so the
+        // phones' own reconnects (same code, see controller.js) land in it.
+        room = ROOM_CODE_RE.test(wantCode) ? createRoom(socket.id, wantCode) : createRoom(socket.id);
       }
       socketRoom.set(socket.id, room.code);
       socket.join(gameRoomOf(room.code));
