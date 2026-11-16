@@ -1010,10 +1010,10 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // Launching from the menu goes straight into flight — no instruction screen.
-// The neutral capture waits out the boot grace (the hand is still coming
-// down from pointing at the tile), and the first wave holds off a moment.
+// Neutral is captured on the first sample so steering works from launch;
+// the first wave holds off a moment.
 startRun(progress.unlocked);
-steer.recentre(performance.now() + 1800);
+steer.recentre();
 game.nextSpawnMs = performance.now() + 2400;
 
 hydrateIcons();
