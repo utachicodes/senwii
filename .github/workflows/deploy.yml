@@ -43,6 +43,8 @@ jobs:
       - name: Decode deploy key
         run: |
           echo "${{ secrets.VPS_SSH_KEY_B64 }}" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/deploy_key"
+          # OpenSSH rejects a key whose last line has no newline ("invalid format").
+          [ -n "$(tail -c1 "$RUNNER_TEMP/deploy_key")" ] && echo >> "$RUNNER_TEMP/deploy_key"
           chmod 600 "$RUNNER_TEMP/deploy_key"
           echo "decoded key size: $(wc -c < "$RUNNER_TEMP/deploy_key") bytes"
           grep -q "BEGIN OPENSSH PRIVATE KEY" "$RUNNER_TEMP/deploy_key" || { echo "::error::decoded file is not a valid OpenSSH private key — check the VPS_SSH_KEY_B64 secret"; exit 1; }
