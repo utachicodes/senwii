@@ -44,8 +44,8 @@ app.use('/games', express.static(GAMES_DIR, { extensions: ['html'], ...NO_CACHE 
 // The shared motion engine, imported directly by games as ES modules.
 app.use('/core', express.static(path.join(__dirname, 'core'), NO_CACHE));
 // Heavy, rarely-changing files get real caching, unlike code above: online,
-// revalidating Mario Kart's ~100MB pack + three.js on every visit meant every
-// load paid hundreds of round trips. three.js only changes with an npm bump;
+// revalidating a big asset pack + three.js on every visit meant every load
+// paid hundreds of round trips. three.js only changes with an npm bump;
 // assets (models, audio) change rarely enough that a day's staleness is fine.
 const VENDOR_CACHE = { maxAge: '7d' };
 const ASSET_CACHE = { maxAge: '1d' };
@@ -168,8 +168,9 @@ const MAX_PLAYERS = 4;
 // core/splash.js) instead of minting a fresh one, so this window just covers
 // the gap between the old socket's disconnect and the new page's connect.
 // That gap is the new page's whole load time: on a LAN it's a blink, but
-// online Mario Kart pulls ~100MB before its socket exists. 8s closed the
-// room mid-load in production and stranded every phone, so be generous.
+// online a heavy game page pulls its assets before its socket exists. 8s
+// closed the room mid-load in production and stranded every phone, so be
+// generous.
 const ROOM_RECLAIM_MS = 60000;
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L
 const rooms = new Map();        // code → { code, gameSocketId, slots: [socketId|null] }

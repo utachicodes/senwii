@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dance Party — SenWii</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; cursor: none;
+    background: #0b0816; color: #eef1f6;
+    font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+  }
+  canvas#game { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  #hud { position: absolute; inset: 0; pointer-events: none; }
+  .card {
+    position: absolute; background: #ffffffea; color: #1a2230;
+    border: 1px solid #c9d2e0; border-radius: 14px;
+  }
+  #scorecard { left: 26px; top: 22px; padding: 10px 16px; }
+  #score { font-size: 32px; font-weight: 800; line-height: 1.05; }
+  #combo { font-size: 13px; color: #51607a; margin-top: 2px; }
+  #songtag { font-size: 12px; color: #51607a; }
+
+  #status {
+    position: absolute; right: 26px; top: 22px; padding: 9px 14px;
+    font-size: 13px; color: #51607a; text-align: right;
+  }
+  #status b { color: #1a2230; }
+
+  #camwrap {
+    position: absolute; right: 26px; bottom: 72px; width: 180px; height: 135px;
+    border-radius: 14px; overflow: hidden; border: 2px solid #ffffff30;
+    background: #000; opacity: .9;
+  }
+  #camwrap.off { display: none; }
+  #cam { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #camlabel {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px;
+    font-size: 10px; color: #fff; background: linear-gradient(transparent, #000a);
+    text-align: center;
+  }
+
+  #judge {
+    position: absolute; left: 50%; top: 32%; transform: translate(-50%, -50%);
+    font-size: 44px; font-weight: 900; color: #fff; text-shadow: 0 4px 16px #000a;
+    opacity: 0; transition: opacity .12s; white-space: nowrap;
+  }
+  #judge.on { opacity: 1; }
+  #prompt {
+    position: absolute; left: 50%; bottom: 118px; transform: translateX(-50%);
+    font-size: 18px; font-weight: 700; color: #fff; text-shadow: 0 2px 10px #000a;
+    opacity: 0; transition: opacity .15s; white-space: nowrap;
+  }
+  #prompt.on { opacity: 1; }
+
+  #keys { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+          font-size: 11px; color: #9aa7bd; }
+  #keys a { color: inherit; pointer-events: auto; }
+  #link { position: absolute; left: 26px; bottom: 24px; display: flex; align-items: center;
+          gap: 9px; font-size: 13px; color: #9aa7bd; background: #ffffff14;
+          border: 1px solid #ffffff22; padding: 9px 14px; border-radius: 999px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #5a6782; }
+  .dot.on { background: #35d07f; }
+  #debug { position: absolute; left: 26px; top: 120px; margin: 0; display: none;
+           background: #ffffffe6; border: 1px solid #c9d2e0; border-radius: 12px;
+           padding: 13px 15px; font: 12px/1.6 ui-monospace, Menlo, monospace;
+           color: #51607a; white-space: pre; }
+  #debug.on { display: block; }
+
+  #overlay { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5;
+             background: radial-gradient(ellipse at 50% 35%, #2a1c52aa, #0b0816f5 72%); }
+  #overlay.hide { display: none; }
+  .panel { text-align: center; max-width: 660px; padding: 0 30px; }
+  .panel h1 { font-size: 52px; margin: 0 0 6px; font-weight: 800; letter-spacing: -0.03em; }
+  .panel h1 em { font-style: normal;
+    background: linear-gradient(120deg, #ff8bd1, #7fd4ff, #ffe36e);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .panel p { color: #c3cbdc; margin: 0 auto 16px; max-width: 500px; }
+  #songs { display: flex; gap: 12px; justify-content: center; margin: 16px 0 8px; flex-wrap: wrap; }
+  .song {
+    width: 140px; padding: 10px 8px; border-radius: 14px; text-align: center;
+    background: #ffffff10; border: 2px solid #ffffff1c; color: #eef1f6;
+  }
+  .song.sel { border-color: #ff8bd1; background: #ff8bd11c; }
+  .song .se { font-size: 30px; }
+  .song .sn { font-weight: 800; font-size: 14px; margin-top: 2px; }
+  .song .sm { font-size: 11px; color: #9aa7bd; margin-top: 2px; }
+  .song.locked { opacity: .38; filter: grayscale(.7); }
+  .cta { font-size: 14px; color: #c3cbdc; }
+  .cta strong { color: #fff; }
+  .note { font-size: 12px; color: #9aa7bd; margin-top: 10px; }
+  .results { margin: 8px auto 14px; text-align: left; display: inline-block;
+             font: 15px/2 ui-monospace, Menlo, monospace; }
+  .grade { font-size: 72px; font-weight: 900; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="card" id="scorecard">
+    <div id="songtag">Dance Party</div>
+    <div id="score">0</div>
+    <div id="combo">combo 0 · x1</div>
+  </div>
+  <div class="card" id="status"><b>camera</b><br><span id="camstatus">off</span><br><b>phone</b><br><span id="phonestatus">waiting</span></div>
+  <div id="judge"></div>
+  <div id="prompt"></div>
+  <div id="camwrap" class="off"><video id="cam" autoplay playsinline muted></video><div id="camlabel">camera (on-device only)</div></div>
+  <div id="keys"><a href="/">← Games</a> · match the moves to the beat · body / face / phone ·
+    <b>A</b>/Space start · <b>↑↓</b> song · <b>D</b> debug</div>
+  <div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
+  <pre id="debug"></pre>
+</div>
+
+<div id="overlay">
+  <div class="panel" id="panel">
+    <h1>💃 <em>Dance Party</em></h1>
+    <p>Move to the beat: step <b>left/right</b> or throw your arms <b>up</b> for the camera,
+       flash a <b>face</b> move when you can, and <b>shake / swing / raise</b> the phone on cue.
+       Camera stays on your device. No camera? Phone moves still groove.</p>
+    <div id="songs"></div>
+    <div class="note">Allow camera access for body & face moves. Everything is processed locally.</div>
+    <div class="cta"><strong>A</strong> or <strong>Space</strong> to dance · <strong>↑↓</strong> pick song · <strong>B</strong> menu</div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="game.js"></script>
+</body>
+</html>

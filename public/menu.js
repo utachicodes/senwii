@@ -17,7 +17,7 @@ import { clamp } from '/core/orientation.js';
 const $ = (id) => document.getElementById(id);
 
 const ICONS = {
-  'mario-kart': 'i-kart',
+  racing: 'i-kart',
   'fruit-ninja': 'i-blade',
   'alien-attack': 'i-invader',
   'shooting-range': 'i-target',

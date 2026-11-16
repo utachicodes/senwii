@@ -18,9 +18,8 @@ closest to what you're building:
   which wires the relay link, phone A/B buttons, mouse fallback, and the
   speed/debug keyboard shortcuts for you.
 - **A duel or 1-vs-AI game:** `games/swordplay/` or `games/table-tennis/`.
-- **Heavier, bespoke input handling:** `games/fruit-ninja/` or
-  `games/mario-kart/` construct `GameLink` directly instead of going through
-  `createChannel()`.
+- **Heavier, bespoke input handling:** `games/fruit-ninja/` constructs
+  `GameLink` directly instead of going through `createChannel()`.
 
 Each game keeps rendering (`game.js`) separate from pure, tested logic
 (`logic.js` + `logic.test.mjs`) — run the whole suite with `npm run
@@ -44,9 +43,8 @@ Fork, branch, open a PR. Keep PRs scoped to one game or one piece of the
 relay/engine — a PR that touches `core/` should explain why every game that
 imports it still behaves the same.
 
-Run `npm run test:unit` before opening a PR. If you touched Mario Kart,
-also see its own [README](games/mario-kart/README.md) for the browser-driven
-checks.
+Run `npm run test:unit` before opening a PR.
 
 Don't commit generated/downloaded assets (models, audio source archives) —
-see `assets/mario-kart/README.md` for what's tracked vs. gitignored there.
+procedural art belongs in the game's own code, and anything large and
+third-party should stay out of git.

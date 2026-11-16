@@ -6,7 +6,7 @@ const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { axesFromSample } from '../../core/orientation.js';
 import {
-  Patrol, captureTray, trayRead, SteerFilter, fmtMs, LANE_HALF, LIVES,
+  Patrol, TraySteer, fmtMs, LANE_HALF, LIVES,
 } from './logic.js';
 
 /**
@@ -347,11 +347,11 @@ const game = new Patrol({ onEvent: handleEvent, seed: (performance.now() * 997) 
 let started = false;
 
 // Failsafe for the one thing only a real hand can prove: if steering ever
-// feels backwards on a device, press I once and it sticks.
+// feels backwards on a device, press I once and it sticks. The capture,
+// anti-drift, grip-change re-centring and smoothing all live in TraySteer
+// (core/tilt.js) — the game only feeds it samples and reads the result.
 let invertSteer = localStorage.getItem('senwii.chargeInvert2') === '1';
-let trayRef = null;                  // captured neutral; null = capture next sample
-let steerFilter = new SteerFilter();
-let captureNotBefore = 0;            // boot grace: time to lay the phone flat
+const steer = new TraySteer({ invert: invertSteer });
 
 const channel = createChannel({
   room: launchData?.room,
@@ -363,18 +363,10 @@ const channel = createChannel({
     }
   },
   onCommand: (cmd) => {
-    if (cmd.type === 'calibrate' || cmd.type === 'recentre') {
-      trayRef = null;
-      steerFilter = new SteerFilter();
-    }
+    if (cmd.type === 'calibrate' || cmd.type === 'recentre') steer.recentre();
   },
   onSample: (sample, dt, now) => {
-    const axes = axesFromSample(sample);
-    if (!trayRef && now >= captureNotBefore) trayRef = captureTray(axes);
-    if (!trayRef) return;
-    const raw = trayRead(axes, trayRef).bank;
-    const shaped = steerFilter.update(raw, dt);
-    game.setSteer(invertSteer ? -shaped : shaped);
+    game.setSteer(steer.update(axesFromSample(sample), dt, now));
   },
 });
 
@@ -427,6 +419,7 @@ window.addEventListener('keydown', (e) => {
   keys[e.key] = true;
   if (e.key.toLowerCase() === 'i') {
     invertSteer = !invertSteer;
+    steer.setInvert(invertSteer);
     localStorage.setItem('senwii.chargeInvert2', invertSteer ? '1' : '0');
     popup(invertSteer ? 'steering inverted' : 'steering normal');
   }
@@ -435,9 +428,7 @@ window.addEventListener('keyup', (e) => { keys[e.key] = false; });
 
 function startRun() {
   started = true;
-  trayRef = null;                    // your pose right now becomes "straight"
-  steerFilter = new SteerFilter();
-  captureNotBefore = 0;
+  steer.recentre();                  // your pose at rest becomes "straight"
   for (const m of saucers.values()) scene.remove(m);
   saucers.clear();
   game.start(performance.now());
@@ -509,6 +500,9 @@ function frame(now) {
   if (dt <= 0) return;
 
   channel.poll(now);
+  // Between rounds the phone rests in whatever pose the player left it:
+  // mark the steer idle so that pose becomes the next round's neutral.
+  steer.idle = game.state !== 'running';
   if (!channel.pointer.live) {
     const bank = (keys.ArrowRight ? 15 : 0) + (keys.ArrowLeft ? -15 : 0);
     if (bank || keys._touched) { game.setSteer(bank); keys._touched = true; }
@@ -644,6 +638,7 @@ function frame(now) {
   if (dbg && dbg.classList.contains('on')) {
     dbg.textContent = `state ${game.state}\nz ${game.z.toFixed(1)} x ${game.x.toFixed(2)}\n`
       + `speed ${game.speed.toFixed(1)} steer ${game.steer.toFixed(1)}°\n`
+      + `tilt ${steer.describe()}\n`
       + `aliens ${game.aliens.length} bolts ${game.bolts.length}/${game.alienBolts.length}\n`
       + `lives ${game.lives} invert ${invertSteer}`;
   }
@@ -653,8 +648,8 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // Launching from the menu goes straight into flight — no instruction screen.
-// The neutral capture waits out the boot grace (the hand is still coming
-// down from pointing at the tile), and the first wave holds off a moment.
+// The neutral capture waits for the phone to be still (the hand is still
+// coming down from pointing at the tile), and the first wave holds off a
+// moment.
 startRun();
-captureNotBefore = performance.now() + 1800;
 game.nextSpawnMs = performance.now() + 2400;

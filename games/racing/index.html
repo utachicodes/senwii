@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Turbo Racing — SenWii</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; cursor: none;
+      background: #141220; color: #eef1f6;
+      font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; }
+    #game { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+    #hud { position: absolute; inset: 0; pointer-events: none; }
+    .card {
+      position: absolute; background: #ffffffe6; color: #1a2230;
+      border: 1px solid #c9d2e0; border-radius: 14px;
+    }
+    #racecard { left: 28px; top: 24px; padding: 10px 18px; }
+    #place { font-size: 34px; font-weight: 800; line-height: 1.1; }
+    #laprow { font-size: 13px; color: #51607a; margin-top: 2px; white-space: nowrap; }
+    #timetrial { font-size: 14px; font-weight: 700; margin-top: 4px; white-space: nowrap; }
+    #standings {
+      position: absolute; right: 28px; top: 24px; padding: 8px 12px;
+      font: 600 13px/1.9 ui-monospace, Menlo, monospace; color: #51607a;
+      min-width: 132px;
+    }
+    #standings div b { float: right; font-weight: 700; }
+    #standings .you { color: #b3541e; }
+
+    #speedo {
+      position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%);
+      text-align: center; pointer-events: none;
+    }
+    #speed { font-size: 40px; font-weight: 800; color: #fff; text-shadow: 0 2px 10px #0008; }
+    #speed small { font-size: 14px; font-weight: 600; color: #ffffffb0; }
+    #driftwrap {
+      width: 190px; height: 10px; margin: 6px auto 0; border-radius: 999px;
+      background: #ffffffb0; border: 1px solid #c9d2e0; overflow: hidden; opacity: 0;
+      transition: opacity .15s;
+    }
+    #driftwrap.on { opacity: 1; }
+    #drift { height: 100%; width: 0%; background: linear-gradient(90deg, #ffd23e, #ff8a3e, #ff4e6e); }
+
+    #minimap {
+      position: absolute; right: 28px; bottom: 44px; width: 148px; height: 148px;
+      opacity: .92;
+    }
+
+    #banner {
+      position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
+      font-size: 64px; font-weight: 900; color: #fff; text-shadow: 0 6px 18px #000a;
+      opacity: 0; transition: opacity .12s; white-space: nowrap;
+    }
+    #banner.on { opacity: 1; }
+    #banner em { font-style: normal; color: #ffd23e; }
+    #toast {
+      position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%);
+      font-size: 15px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px #000a;
+      opacity: 0; transition: opacity .15s; white-space: nowrap;
+    }
+    #toast.on { opacity: 1; }
+
+    #keys { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+            font-size: 11px; color: #9aa7bd; }
+    #keys a { color: inherit; pointer-events: auto; }
+    #link { position: absolute; left: 28px; bottom: 24px; display: flex; align-items: center;
+            gap: 9px; font-size: 13px; color: #9aa7bd; background: #ffffff14;
+            border: 1px solid #ffffff22; padding: 9px 14px; border-radius: 999px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #5a6782; }
+    .dot.on { background: #35d07f; }
+    #debug { position: absolute; left: 28px; top: 128px; margin: 0; display: none;
+             background: #ffffffe6; border: 1px solid #c9d2e0; border-radius: 12px;
+             padding: 13px 15px; font: 12px/1.6 ui-monospace, Menlo, monospace;
+             color: #51607a; white-space: pre; }
+    #debug.on { display: block; }
+
+    #overlay { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5;
+               background: radial-gradient(ellipse at 50% 35%, #2a2456aa, #141220f5 72%); }
+    #overlay.hide { display: none; }
+    .panel { text-align: center; max-width: 620px; padding: 0 30px; }
+    .panel h1 { font-size: 52px; margin: 0 0 6px; font-weight: 800; letter-spacing: -0.03em; }
+    .panel h1 em { font-style: normal;
+      background: linear-gradient(120deg, #ffd23e, #ff6a3e);
+      -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .panel p { color: #c3cbdc; margin: 0 auto 18px; max-width: 470px; }
+    #tracks { display: flex; gap: 12px; justify-content: center; margin: 18px 0 6px; }
+    .track {
+      width: 158px; padding: 12px 10px; border-radius: 14px; text-align: center;
+      background: #ffffff10; border: 2px solid #ffffff1c; color: #eef1f6;
+    }
+    .track.sel { border-color: #ffd23e; background: #ffd23e1c; }
+    .track .te { font-size: 34px; }
+    .track .tn { font-weight: 800; font-size: 15px; margin-top: 2px; }
+    .track .tm { font-size: 11px; color: #9aa7bd; margin-top: 2px; white-space: nowrap; }
+    .track.locked { opacity: .38; filter: grayscale(.7); }
+    .cta { font-size: 14px; color: #c3cbdc; }
+    .cta strong { color: #fff; }
+    #points { font-size: 13px; color: #9aa7bd; margin-top: 10px; }
+    .results { margin: 8px auto 14px; text-align: left; display: inline-block;
+               font: 14px/1.9 ui-monospace, Menlo, monospace; }
+    .results b { float: right; margin-left: 26px; }
+    .results .you { color: #ffd23e; font-weight: 800; }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="card" id="racecard">
+    <div id="place">6th</div>
+    <div id="laprow">lap 1/3</div>
+    <div id="timetrial">0:00.00</div>
+  </div>
+  <div class="card" id="standings"></div>
+  <div id="banner"></div>
+  <div id="toast"></div>
+  <div id="speedo">
+    <div id="speed">0<small> km/h</small></div>
+    <div id="driftwrap"><div id="drift"></div></div>
+  </div>
+  <canvas id="minimap" width="296" height="296"></canvas>
+  <div id="keys"><a href="/">← Games</a> · tilt to steer · hold <b>A</b>/Space to drift ·
+    <b>1</b> brake · <b>−</b> recentre · <b>D</b> debug · <b>↑↓</b> track</div>
+  <div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
+  <pre id="debug"></pre>
+</div>
+
+<div id="overlay">
+  <div class="panel" id="panel">
+    <h1>🏎️ <em>Turbo Racing</em></h1>
+    <p>Hold the phone like a wheel and roll it to steer. Bank into a corner and
+       hold <b>A</b> to drift — let go for a mini-turbo. Blue arrows are boost
+       pads. Finish <b>top 3</b> to unlock the next cup.</p>
+    <div id="tracks"></div>
+    <div id="points"></div>
+    <div class="cta"><strong>A</strong> or <strong>Space</strong> race · <strong>↑↓</strong> pick track · <strong>B</strong> menu</div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="game.js"></script>
+</body>
+</html>

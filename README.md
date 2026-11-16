@@ -81,11 +81,12 @@ play.
 
 | Game | How to play | Players |
 | --- | --- | --- |
-| [Mario Kart](games/mario-kart/README.md) | Hold your phone sideways to steer, drift, boost and use items. The linked guide covers controls and included assets. | 1 human + 7 CPU racers |
+| [Turbo Racing](games/racing/) | Hold the phone like a steering wheel to steer, hop-drift for boost. Three cups of CPU rivals. | 1 human + 5 CPU racers |
 | [Fruit Ninja](games/fruit-ninja/) | Swing to slice fruit, dodge bombs and build combos. | Up to 4 |
-| [Alien Attack](games/alien-attack/) | Tilt to fly and press A to fire. | 1 |
+| [Alien Attack](games/alien-attack/) | Roll the phone flat to fly and press A to fire. | 1 |
 | [Shooting Range](games/shooting-range/) | Point and press A to hit targets against the clock. | 1 |
-| [Bowling](games/bowling/) | Point down the lane, swing to release. Ten frames, standard scoring. | 1 |
+| [Bowling](games/bowling/) | Point down the lane, swing your hand to bowl — speed and spin come from the swing. Ten frames, standard scoring. | 1 |
+| [Dance Party](games/dance/) | The webcam and phone watch your moves — arms, head, shakes — hit every beat. | 1 |
 | [Boxing](games/boxing/) | Guard high or low, swing up or down to punch. First to 3 clean hits. | 1 |
 | [Air Hockey](games/air-hockey/) | Point to move your mallet. Defend your goal, pot the puck in theirs. | 1 |
 

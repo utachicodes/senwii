@@ -8,32 +8,54 @@
   * { box-sizing: border-box; }
   html, body {
     margin: 0; height: 100%; overflow: hidden; cursor: none;
-    background: #1a2230; color: #eef1f6;
+    background: #11161f; color: #eef1f6;
     font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     user-select: none;
   }
-  canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+  canvas#game { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
 
   #hud { position: absolute; inset: 0; pointer-events: none; }
-  #card {
-    position: absolute; left: 28px; top: 24px; background: #ffffffe6; color: #1a2230;
-    border: 1px solid #c9d2e0; border-radius: 14px; padding: 12px 18px;
+  .card {
+    position: absolute; background: #ffffffe6; color: #1a2230;
+    border: 1px solid #c9d2e0; border-radius: 14px;
   }
+  #scorecard { left: 28px; top: 22px; padding: 10px 14px; min-width: 170px; }
   #frame { font-size: 12px; color: #51607a; text-transform: uppercase; letter-spacing: .1em; }
-  #score { font-size: 30px; font-weight: 800; margin-top: 2px; }
+  #score { font-size: 32px; font-weight: 800; margin-top: 2px; line-height: 1.05; }
   #ball-no { font-size: 13px; color: #51607a; }
+  #patternTag { font-size: 12px; color: #51607a; margin-top: 4px; }
+
+  #board {
+    position: absolute; left: 50%; top: 20px; transform: translateX(-50%);
+    display: flex; gap: 2px; pointer-events: none;
+  }
+  .fc {
+    width: 42px; background: #ffffffe0; border: 1px solid #c9d2e0; border-radius: 6px;
+    overflow: hidden; font-size: 10px; color: #1a2230;
+  }
+  .fc.tenth { width: 56px; }
+  .fc .fn { background: #1a2230; color: #fff; text-align: center; font-weight: 700; padding: 1px 0; }
+  .fc .marks { display: flex; height: 16px; border-bottom: 1px solid #e4e8f0; }
+  .fc .marks span { flex: 1; display: grid; place-items: center; border-left: 1px solid #e4e8f0; font-weight: 600; }
+  .fc .marks span:first-child { border-left: 0; }
+  .fc .tot { height: 16px; display: grid; place-items: center; font-weight: 700; }
 
   #powerwrap {
-    position: absolute; left: 50%; bottom: 52px; transform: translateX(-50%);
-    width: 240px; height: 12px; border-radius: 999px; background: #ffffffb0;
+    position: absolute; left: 50%; bottom: 54px; transform: translateX(-50%);
+    width: 260px; height: 14px; border-radius: 999px; background: #ffffffb0;
     border: 1px solid #c9d2e0; opacity: 0; transition: opacity .2s; overflow: hidden;
   }
   #powerwrap.on { opacity: 1; }
-  #power { height: 100%; width: 0%; background: linear-gradient(90deg, #5b8cff, #c2660a); }
+  #power { height: 100%; width: 0%; background: linear-gradient(90deg, #5b8cff, #f0a030 70%, #e23b3b); }
+  #hookhint {
+    position: absolute; left: 50%; bottom: 36px; transform: translateX(-50%);
+    font-size: 12px; color: #9aa7bd; opacity: 0; transition: opacity .2s; white-space: nowrap;
+  }
+  #hookhint.on { opacity: 1; }
 
   #banner {
-    position: absolute; left: 50%; top: 20%; transform: translateX(-50%);
-    font-size: 38px; font-weight: 900; color: #fff; text-shadow: 0 4px 14px #0007;
+    position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
+    font-size: 40px; font-weight: 900; color: #fff; text-shadow: 0 4px 14px #0007;
     opacity: 0; transition: opacity .15s; white-space: nowrap;
   }
   #banner.on { opacity: 1; }
@@ -53,14 +75,24 @@
   #debug.on { display: block; }
 
   #overlay { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5;
-             background: radial-gradient(ellipse at 50% 40%, #28344caa, #1a2230f2 70%); }
+             background: radial-gradient(ellipse at 50% 40%, #28344caa, #11161ff2 70%); }
   #overlay.hide { display: none; }
-  .panel { text-align: center; max-width: 560px; padding: 0 30px; }
+  .panel { text-align: center; max-width: 620px; padding: 0 30px; }
   .panel h1 { font-size: 54px; margin: 0 0 8px; font-weight: 800; letter-spacing: -0.03em; }
   .panel h1 em { font-style: normal;
     background: linear-gradient(120deg, #5b8cff, #c2660a);
     -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .panel p { color: #c3cbdc; margin: 0 auto 24px; max-width: 430px; }
+  .panel p { color: #c3cbdc; margin: 0 auto 18px; max-width: 460px; }
+  #patterns { display: flex; gap: 12px; justify-content: center; margin: 16px 0 8px; }
+  .pat {
+    width: 150px; padding: 10px 10px; border-radius: 14px; text-align: center;
+    background: #ffffff10; border: 2px solid #ffffff1c; color: #eef1f6;
+  }
+  .pat.sel { border-color: #5b8cff; background: #5b8cff1c; }
+  .pat .pe { font-size: 30px; }
+  .pat .pn { font-weight: 800; font-size: 15px; margin-top: 2px; }
+  .pat .pd { font-size: 11px; color: #9aa7bd; margin-top: 2px; }
+  .pat.locked { opacity: .38; filter: grayscale(.7); }
   .cta { font-size: 14px; color: #c3cbdc; }
   .cta strong { color: #fff; }
 </style>
@@ -69,15 +101,18 @@
 <canvas id="game"></canvas>
 
 <div id="hud">
-  <div id="card">
+  <div class="card" id="scorecard">
     <div id="frame">frame 1 / 10</div>
     <div id="score">0</div>
     <div id="ball-no">ball 1</div>
+    <div id="patternTag"></div>
   </div>
+  <div id="board"></div>
   <div id="banner"></div>
   <div id="powerwrap"><div id="power"></div></div>
-  <div id="keys"><a href="/">← Games</a> · point to aim · swing the phone to release ·
-    <b>A</b>/Space start · <b>D</b> debug</div>
+  <div id="hookhint">curve your hand at release to hook the ball</div>
+  <div id="keys"><a href="/">← Games</a> · aim with the pointer · <b>swing</b> to bowl · curve the release to hook ·
+    <b>A</b>/Space start · <b>↑↓</b> lane · <b>D</b> debug</div>
   <div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
   <pre id="debug"></pre>
 </div>
@@ -85,10 +120,11 @@
 <div id="overlay">
   <div class="panel" id="panel">
     <h1>🎳 <em>Bowling</em></h1>
-    <p>Ten frames, standard scoring. Point with the pointer to aim down the
-       lane, then swing the phone to release — harder swings roll faster.
-       Strikes and spares earn their usual bonus.</p>
-    <div class="cta"><strong>A</strong> or <strong>Space</strong> to bowl · <strong>B</strong> menu</div>
+    <p>Aim with the pointer, then <b>swing your hand</b> to bowl — swing speed
+       sets power, and a twist at release puts hook on the ball. Read the oil,
+       pick your line, and chase 300.</p>
+    <div id="patterns"></div>
+    <div class="cta"><strong>A</strong> or <strong>Space</strong> to bowl · <strong>↑↓</strong> pick lane · <strong>B</strong> menu</div>
   </div>
 </div>
 
@@ -96,3 +132,4 @@
 <script type="module" src="game.js"></script>
 </body>
 </html>
+

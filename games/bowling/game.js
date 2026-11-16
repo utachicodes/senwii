@@ -6,13 +6,16 @@ const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { ParticleBurst, dotTexture, canvasTexture } from '../shared/fx.js';
-import { Game, LANE, HEADPIN_Z, PIN_RADIUS } from './logic.js';
+import {
+  Game, LANE, HEADPIN_Z, PIN_RADIUS, PATTERNS, patternById,
+  frameCards, loadBowlSave, persistBowlSave,
+} from './logic.js';
 
 /**
  * Bowling — renderer. Ten-pin logic lives in logic.js; this draws the lane,
- * pins and ball, turns swings into roll()s, and carries its own sound design
- * and impact particles — the same tier as fruit-ninja/shooting-range/
- * alien-attack's custom cues, not the shared generic ones.
+ * pins and ball, turns hand swings into deliveries (speed = power, sideways
+ * twist at release = hook), and renders a 10-frame scoreboard with three oil
+ * patterns ("levels") that change how the ball reads the lane.
  */
 
 const $ = (id) => document.getElementById(id);
@@ -31,8 +34,6 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 const key = new THREE.DirectionalLight(0xfff2d0, 1.1);
 key.position.set(1.5, 9, 4);
 scene.add(key);
-// Overhead lane lights — a row of warm pools down the lane, the one thing
-// that actually reads as "bowling alley" rather than "flat plane in the dark".
 for (let i = 0; i < 5; i += 1) {
   const l = new THREE.PointLight(0xffd9a0, 0.55, 7, 2);
   l.position.set(0, 2.6, i * 3.6);
@@ -42,7 +43,7 @@ const pinGlow = new THREE.PointLight(0x9fd6ff, 0.9, 10);
 pinGlow.position.set(0, 2.2, HEADPIN_Z + 0.6);
 scene.add(pinGlow);
 
-// ── Lane: procedural wood-plank texture, not a flat fill ───────────────────
+// ── Lane: procedural wood-plank texture ────────────────────────────────────
 const laneTex = canvasTexture((g, s) => {
   g.fillStyle = '#c99a5b';
   g.fillRect(0, 0, s, s);
@@ -55,7 +56,6 @@ const laneTex = canvasTexture((g, s) => {
   for (let i = 0; i <= 9; i += 1) {
     g.beginPath(); g.moveTo((i * s) / 9, 0); g.lineTo((i * s) / 9, s); g.stroke();
   }
-  // A little random grain noise so it doesn't read as a repeating tile.
   for (let i = 0; i < 400; i += 1) {
     g.fillStyle = `rgba(80,50,20,${0.03 + Math.random() * 0.05})`;
     g.fillRect(Math.random() * s, Math.random() * s, 2 + Math.random() * 14, 1);
@@ -67,12 +67,20 @@ laneTex.repeat.set(1, 9);
 const laneGeo = new THREE.PlaneGeometry(LANE.HALF_WIDTH * 2, LANE.LENGTH + 2);
 laneGeo.rotateX(-Math.PI / 2);
 const lane = new THREE.Mesh(laneGeo, new THREE.MeshStandardMaterial({
-  map: laneTex, roughness: 0.28, metalness: 0.08, envMapIntensity: 0.6,
+  map: laneTex, roughness: 0.28, metalness: 0.08,
 }));
 lane.position.z = LANE.LENGTH / 2 - 1;
 scene.add(lane);
 
-// Foul-line arrows, a real decal rather than empty wood.
+// Oil sheen overlay — tint varies with the selected pattern.
+const oilMat = new THREE.MeshBasicMaterial({
+  color: 0x9fd6ff, transparent: true, opacity: 0.06, depthWrite: false,
+});
+const oil = new THREE.Mesh(new THREE.PlaneGeometry(LANE.HALF_WIDTH * 1.7, LANE.LENGTH - 1), oilMat);
+oil.rotation.x = -Math.PI / 2;
+oil.position.set(0, 0.003, LANE.LENGTH / 2 - 0.6);
+scene.add(oil);
+
 const arrowTex = canvasTexture((g, s) => {
   g.clearRect(0, 0, s, s);
   g.fillStyle = 'rgba(20,20,24,0.55)';
@@ -107,7 +115,6 @@ for (const side of [-1, 1]) {
   scene.add(rim);
 }
 
-// Pit backdrop — without it the pins float in pure black.
 const pit = new THREE.Mesh(
   new THREE.PlaneGeometry(LANE.HALF_WIDTH * 3.2, 3),
   new THREE.MeshStandardMaterial({ color: 0x1b2230, roughness: 0.8 }),
@@ -121,8 +128,15 @@ const pitTrim = new THREE.Mesh(
 pitTrim.position.set(0, 0.03, HEADPIN_Z + 1.47);
 scene.add(pitTrim);
 
-// ── Pins: a real lathed silhouette (neck, shoulder, head) with a red band ──
-const pinHeight = 0.38;
+// Sweep bar (animated between balls).
+const sweepBar = new THREE.Mesh(
+  new THREE.BoxGeometry(LANE.HALF_WIDTH * 2.2, 0.18, 0.18),
+  new THREE.MeshStandardMaterial({ color: 0x4b5568, roughness: 0.4, metalness: 0.4 }),
+);
+sweepBar.visible = false;
+scene.add(sweepBar);
+
+// ── Pins ───────────────────────────────────────────────────────────────────
 const pinProfile = [
   [0.050, 0.000], [0.062, 0.020], [0.073, 0.085], [0.070, 0.160],
   [0.052, 0.235], [0.034, 0.295], [0.050, 0.330], [0.044, 0.360], [0.000, 0.385],
@@ -145,19 +159,24 @@ function makePin() {
   return g;
 }
 
-let game = new Game({ onEvent: handleEvent });
-let pinMeshes = [];
-let pinFall = [];     // per-pin { t, dir } animation state, parallel to game.pins
-let pinsRef = null;   // identity check: logic.js swaps in a fresh pins[] on
+let game = new Game({ onEvent: handleEvent, animateSweep: true });
+let pinMeshes = [];   // parallel to game.pins
+let pinFall = [];     // parallel: { t, ax, dir }
+let pinsRef = null;
 
 function rebuildPins() {
   pinMeshes.forEach((m) => scene.remove(m));
   pinMeshes = game.pins.map(() => { const m = makePin(); scene.add(m); return m; });
-  pinFall = game.pins.map(() => ({ t: 0, dir: 1 }));
+  pinFall = game.pins.map((p) => ({
+    t: p.standing ? 0 : 1,
+    ax: p.fallAxis || 0,
+    dir: p.fallDir || 1,
+  }));
   pinsRef = game.pins;
 }
 rebuildPins();
 
+// ── Ball + aim ─────────────────────────────────────────────────────────────
 const ball = new THREE.Mesh(
   new THREE.SphereGeometry(0.13, 20, 16),
   new THREE.MeshStandardMaterial({ color: 0x5b8cff, roughness: 0.15, metalness: 0.25 }),
@@ -175,142 +194,288 @@ const aimArrow = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.5, 4),
 aimArrow.rotation.x = Math.PI / 2;
 scene.add(aimArrow);
 
-// Impact particles: wood-chip sparks at each felled pin, scaled for strikes.
-const burst = new ParticleBurst(scene, { texture: dotTexture('#ffe9b0'), maxParticles: 120 });
+// Hook preview: a faint arc showing where the current aim/last-hook would go.
+const hookLine = new THREE.Line(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({ color: 0x9fd6ff, transparent: true, opacity: 0.35 }),
+);
+scene.add(hookLine);
 
-// ── Wiring ─────────────────────────────────────────────────────────────────
-const swing = new SwingDetector({ onThreshold: 120, minTravel: 20 });
+const burst = new ParticleBurst(scene, { texture: dotTexture('#ffe9b0'), maxParticles: 160 });
+
+// ── UI + patterns ──────────────────────────────────────────────────────────
+let bowlSave = loadBowlSave();
+let patternIndex = 0;
 let started = false;
 let shake = 0;
+let lastHookHint = 0;      // remembered hook from the previous delivery
 
-const channel = createChannel({
-  room: launchData?.room,
-  onA: () => { if (!started || game.state === 'over') startGame(); },
-  onSample: (sample, dt, now) => {
-    const s = swing.update(channel.pointer.rateDps, dt, now);
-    if (s && started && game.state === 'aim') {
-      const power = Math.min(1, s.peak / 420);
-      game.roll(power);
-      channel.feedback({ type: 'slice', combo: 1 });
-      channel.audio.play('bw-release');
-      flashPower(power);
-    }
-  },
-});
-
-// Bowling's own cues — layered noise/tone, not the generic shared ones.
-// Every cue is still overridable by dropping audio/<name>.{mp3,wav,ogg}.
-const { audio } = channel;
-
-audio.register('bw-release', (a) => {
-  a.noise({ dur: 0.22, gain: 0.1, type: 'lowpass', freq: 500, sweepTo: 150 });
-  a.tone({ freq: 90, dur: 0.18, type: 'sine', gain: 0.12, slideTo: 60 });
-});
-
-// A single pin, or a few — a sharp crack plus a wooden clatter.
-audio.register('bw-pins', (a, { pins = 1 } = {}) => {
-  const n = Math.min(pins, 10);
-  a.noise({ dur: 0.1, gain: 0.3, type: 'bandpass', freq: 1200, q: 1.4 });
-  a.tone({ freq: 500, slideTo: 260, dur: 0.1, type: 'triangle', gain: 0.18 });
-  for (let i = 0; i < Math.min(4, n); i += 1) {
-    a.noise({
-      dur: 0.08, gain: 0.14, type: 'bandpass', freq: 700 + Math.random() * 900,
-      q: 2, delay: 0.03 + i * 0.045,
-    });
-  }
-});
-
-// The strike: a big crash, scattered clatter, and a bright resolving chime.
-audio.register('bw-strike', (a) => {
-  a.noise({ dur: 0.4, gain: 0.42, type: 'lowpass', freq: 2400, sweepTo: 300 });
-  a.tone({ freq: 160, dur: 0.3, type: 'triangle', gain: 0.24, slideTo: 70 });
-  for (let i = 0; i < 7; i += 1) {
-    a.noise({
-      dur: 0.1, gain: 0.16, type: 'bandpass', freq: 500 + Math.random() * 1400,
-      q: 1.8, delay: 0.04 + i * 0.05 + Math.random() * 0.03,
-    });
-  }
-  a.tone({ freq: 880, dur: 0.22, type: 'sine', gain: 0.14, delay: 0.42 });
-  a.tone({ freq: 1318, dur: 0.3, type: 'sine', gain: 0.12, delay: 0.5 });
-});
-
-audio.register('bw-gutter', (a) => {
-  a.noise({ dur: 0.35, gain: 0.1, type: 'lowpass', freq: 300 });
-  a.tone({ freq: 140, dur: 0.4, type: 'sine', gain: 0.14, slideTo: 60 });
-});
-
-audio.register('bw-spare', (a) => {
-  a.tone({ freq: 880, dur: 0.14, type: 'sine', gain: 0.2 });
-  a.tone({ freq: 1318, dur: 0.26, type: 'sine', gain: 0.18, delay: 0.1 });
-});
-
-audio.register('bw-gameover', (a) => {
-  a.tone({ freq: 523.25, dur: 0.16, type: 'sine', gain: 0.2 });
-  a.tone({ freq: 659.25, dur: 0.16, type: 'sine', gain: 0.2, delay: 0.14 });
-  a.tone({ freq: 783.99, dur: 0.42, type: 'sine', gain: 0.22, delay: 0.28 });
-});
-
-function startGame() {
-  started = true;
-  game = new Game({ onEvent: handleEvent });
-  rebuildPins();
-  $('overlay').classList.add('hide');
-  syncHud();
+function syncPatterns() {
+  const wrap = $('patterns');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  PATTERNS.forEach((p, i) => {
+    const unlocked = i < bowlSave.unlocked;
+    const best = bowlSave.best[p.id];
+    const card = document.createElement('div');
+    card.className = `pat${i === patternIndex ? ' sel' : ''}${unlocked ? '' : ' locked'}`;
+    card.innerHTML = `<div class="pe">${unlocked ? p.emoji : '🔒'}</div>
+      <div class="pn">${p.name}</div>
+      <div class="pd">${unlocked ? (best ? `best ${best}` : p.desc) : `score ${p.unlockAt}+ to unlock`}</div>`;
+    wrap.appendChild(card);
+  });
 }
 
-function flashPower(p) {
-  const el = $('power');
-  el.style.width = `${Math.round(p * 100)}%`;
-  el.parentElement.classList.add('on');
-  clearTimeout(flashPower.t);
-  flashPower.t = setTimeout(() => el.parentElement.classList.remove('on'), 1200);
+function applyPattern(i) {
+  patternIndex = Math.max(0, Math.min(i, bowlSave.unlocked - 1));
+  // Oil sheen hint: slicker patterns look glossier.
+  const slick = 1 - PATTERNS[patternIndex].friction;
+  oilMat.opacity = 0.03 + slick * 0.09;
+  oilMat.color.setHex(patternIndex === 2 ? 0xcfe8ff : patternIndex === 1 ? 0xbfe2ff : 0xa8d8ff);
+  syncPatterns();
 }
 
-function handleEvent(e) {
-  if (e.type === 'roll') {
-    syncHud();
-  } else if (e.type === 'pin-down') {
-    const pin = game.pins[e.id];
-    if (pin) {
-      burst.spawn(new THREE.Vector3(pin.x, 0.2, pin.z), {
-        count: 10, speed: 1.6, size: 0.05, color: 0xffe9b0, life: 0.5,
-      });
-    }
-    if (pinFall[e.id]) pinFall[e.id].dir = -1;
-  } else if (e.type === 'settled') {
-    syncHud();
-    const prev = game.rolls[game.rolls.length - 2];
-    const isSpare = game.ballInFrame === 1 && prev !== 10 && prev + e.pinsDown === 10;
-    if (e.pinsDown === 10) { audio.play('bw-strike'); shake = 1; }
-    else if (isSpare) audio.play('bw-spare');
-    else if (e.pinsDown === 0) audio.play('bw-gutter');
-    else audio.play('bw-pins', { pins: e.pinsDown });
-    $('banner').textContent = e.pinsDown === 10 ? 'STRIKE!' : isSpare ? 'SPARE!' : `${e.pinsDown} pin${e.pinsDown === 1 ? '' : 's'}`;
-    $('banner').classList.add('on');
-    clearTimeout(handleEvent.t);
-    handleEvent.t = setTimeout(() => $('banner').classList.remove('on'), 1300);
-  } else if (e.type === 'frame') {
+function changePattern(delta) {
+  if (game.state === 'roll' || game.state === 'sweep') return;
+  let i = patternIndex;
+  for (let s = 0; s < PATTERNS.length; s += 1) {
+    i = (i + delta + PATTERNS.length) % PATTERNS.length;
+    if (i < bowlSave.unlocked) { patternIndex = i; break; }
+  }
+  applyPattern(patternIndex);
+  if (started && game.state !== 'over') {
+    game = new Game({ onEvent: handleEvent, pattern: patternIndex, animateSweep: true });
     rebuildPins();
     syncHud();
-  } else if (e.type === 'over') {
-    $('panel').innerHTML = `<h1>🎳 <em>Game over</em></h1>
-      <p>Final score: ${e.score} / 300.</p>
-      <div class="cta"><strong>A</strong> play again · <strong>B</strong> menu</div>`;
-    $('overlay').classList.remove('hide');
-    channel.feedback({ type: 'slice', combo: 3 });
-    audio.play('bw-gameover');
   }
+  channel.audio.play('hover');
+}
+
+function renderScoreboard() {
+  const cards = frameCards(game.rolls);
+  const board = $('board');
+  board.innerHTML = cards.map((c, i) => {
+    const tenth = i === 9;
+    const m = c.marks || [null, null, null];
+    const marks = tenth
+      ? `<span>${m[0] || ''}</span><span>${m[1] || ''}</span><span>${m[2] || ''}</span>`
+      : `<span>${m[0] || ''}</span><span>${m[1] || ''}</span>`;
+    const tot = c.total != null ? c.total : '';
+    return `<div class="fc${tenth ? ' tenth' : ''}"><div class="fn">${i + 1}</div><div class="marks">${marks}</div><div class="tot">${tot}</div></div>`;
+  }).join('');
 }
 
 function syncHud() {
   $('frame').textContent = `frame ${Math.min(game.frameIndex + 1, 10)} / 10`;
   $('score').textContent = String(game.score());
   $('ball-no').textContent = `ball ${game.ballInFrame + 1}`;
+  const tag = $('patternTag');
+  if (tag) tag.textContent = `${game.pattern.emoji} ${game.pattern.name} lane`;
+  renderScoreboard();
+}
+
+// ── Wiring ─────────────────────────────────────────────────────────────────
+const swing = new SwingDetector({ onThreshold: 110, offThreshold: 55, minTravel: 18, maxMs: 600 });
+let shakeCam = 0;
+
+// Track recent lateral rate so hook reflects the hand's twist at release.
+let recentYaw = 0;
+let recentPitch = 0;
+let hookAccum = 0;        // smoothed hook reading over the active swing
+let hookSamples = 0;
+
+const channel = createChannel({
+  room: launchData?.room,
+  onA: () => { if (!started || game.state === 'over') startGame(); },
+  onCommand: (cmd) => {
+    if (cmd.type === 'button') {
+      if (cmd.menuDirection === 'up' || cmd.button === 'up') changePattern(-1);
+      if (cmd.menuDirection === 'down' || cmd.button === 'down') changePattern(1);
+    }
+  },
+  onSample: (sample, dt, now) => {
+    const rate = channel.pointer.rateDps;
+    recentYaw = rate.yaw;
+    recentPitch = rate.pitch;
+
+    const s = swing.update(rate, dt, now);
+    if (swing.active) {
+      // Lateral bias of this instant: negative yaw = hand moved right in
+      // cursor space. Accumulate so the release hook is the swing's character,
+      // not a single noisy sample.
+      const mag = Math.hypot(rate.yaw, rate.pitch) || 1;
+      hookAccum += (-rate.yaw / mag);
+      hookSamples += 1;
+    } else if (!s) {
+      hookAccum = 0; hookSamples = 0;
+    }
+
+    if (s && started && game.state === 'aim') {
+      const power = Math.min(1, Math.max(0.12, s.peak / 420));
+      // Hook from the swing's travel vector (how sideways the hand moved)
+      // blended with the accumulated instant bias.
+      const travelMag = Math.hypot(s.vx, s.vy) || 1;
+      const travelHook = s.vx / travelMag;           // -1..1, + = swept right
+      const instantHook = hookSamples ? hookAccum / hookSamples : 0;
+      let hook = travelHook * 0.55 + instantHook * 0.45;
+      // Scale: a mostly-forward swing keeps a gentle hook; a very sideways
+      // slash caps out. Also damp tiny wiggles.
+      hook = Math.max(-1, Math.min(1, hook * 1.6));
+      if (Math.abs(hook) < 0.08) hook = 0;
+      lastHookHint = hook;
+
+      const launched = game.roll(power, undefined, hook);
+      if (launched) {
+        channel.feedback({ type: 'slice', combo: Math.abs(hook) > 0.35 ? 2 : 1 });
+        channel.audio.play('bw-release');
+        flashPower(power, hook);
+      }
+      hookAccum = 0; hookSamples = 0;
+    }
+  },
+});
+
+// ── Sound design ───────────────────────────────────────────────────────────
+const { audio } = channel;
+
+audio.register('bw-release', (a) => {
+  a.noise({ dur: 0.22, gain: 0.1, type: 'lowpass', freq: 500, sweepTo: 150 });
+  a.tone({ freq: 90, dur: 0.18, type: 'sine', gain: 0.12, slideTo: 60 });
+});
+audio.register('bw-pins', (a, { pins = 1 } = {}) => {
+  const n = Math.min(pins, 10);
+  a.noise({ dur: 0.1, gain: 0.3, type: 'bandpass', freq: 1200, q: 1.4 });
+  a.tone({ freq: 500, slideTo: 260, dur: 0.1, type: 'triangle', gain: 0.18 });
+  for (let i = 0; i < Math.min(4, n); i += 1) {
+    a.noise({ dur: 0.08, gain: 0.14, type: 'bandpass', freq: 700 + Math.random() * 900, q: 2, delay: 0.03 + i * 0.045 });
+  }
+});
+audio.register('bw-strike', (a) => {
+  a.noise({ dur: 0.4, gain: 0.42, type: 'lowpass', freq: 2400, sweepTo: 300 });
+  a.tone({ freq: 160, dur: 0.3, type: 'triangle', gain: 0.24, slideTo: 70 });
+  for (let i = 0; i < 7; i += 1) {
+    a.noise({ dur: 0.1, gain: 0.16, type: 'bandpass', freq: 500 + Math.random() * 1400, q: 1.8, delay: 0.04 + i * 0.05 + Math.random() * 0.03 });
+  }
+  a.tone({ freq: 880, dur: 0.22, type: 'sine', gain: 0.14, delay: 0.42 });
+  a.tone({ freq: 1318, dur: 0.3, type: 'sine', gain: 0.12, delay: 0.5 });
+});
+audio.register('bw-gutter', (a) => {
+  a.noise({ dur: 0.35, gain: 0.1, type: 'lowpass', freq: 300 });
+  a.tone({ freq: 140, dur: 0.4, type: 'sine', gain: 0.14, slideTo: 60 });
+});
+audio.register('bw-spare', (a) => {
+  a.tone({ freq: 880, dur: 0.14, type: 'sine', gain: 0.2 });
+  a.tone({ freq: 1318, dur: 0.26, type: 'sine', gain: 0.18, delay: 0.1 });
+});
+audio.register('bw-gameover', (a) => {
+  a.tone({ freq: 523.25, dur: 0.16, type: 'sine', gain: 0.2 });
+  a.tone({ freq: 659.25, dur: 0.16, type: 'sine', gain: 0.2, delay: 0.14 });
+  a.tone({ freq: 783.99, dur: 0.42, type: 'sine', gain: 0.22, delay: 0.28 });
+});
+audio.register('bw-sweep', (a) => {
+  a.noise({ dur: 0.35, gain: 0.08, type: 'lowpass', freq: 700, sweepTo: 200 });
+});
+
+function startGame() {
+  started = true;
+  game = new Game({ onEvent: handleEvent, pattern: patternIndex, animateSweep: true });
+  rebuildPins();
+  $('overlay').classList.add('hide');
+  $('hookhint').classList.add('on');
+  setTimeout(() => $('hookhint').classList.remove('on'), 3500);
+  syncHud();
+}
+
+function flashPower(p, hook) {
+  const el = $('power');
+  el.style.width = `${Math.round(p * 100)}%`;
+  el.parentElement.classList.add('on');
+  const hh = $('hookhint');
+  if (Math.abs(hook) > 0.18) {
+    hh.textContent = hook > 0 ? 'hooking right ↷' : '↶ hooking left';
+    hh.classList.add('on');
+  }
+  clearTimeout(flashPower.t);
+  flashPower.t = setTimeout(() => { el.parentElement.classList.remove('on'); hh.classList.remove('on'); }, 1400);
+}
+
+function handleEvent(e) {
+  if (e.type === 'roll') {
+    syncHud();
+  } else if (e.type === 'pin-down') {
+    const pin = game.pins.find((p) => p.id === e.id) || game.pins[e.id];
+    if (pin) {
+      burst.spawn(new THREE.Vector3(pin.x, 0.22, pin.z), {
+        count: 10, speed: 1.4 + (e.impulse || 1) * 0.15, size: 0.05, color: 0xffe9b0, life: 0.55,
+      });
+    }
+    // sync fall direction from the logic pin's recorded impact
+    const idx = game.pins.findIndex((p) => p.id === e.id);
+    if (idx >= 0 && pinFall[idx]) {
+      pinFall[idx].dir = 1;
+      pinFall[idx].ax = game.pins[idx].fallAxis || 0;
+    }
+  } else if (e.type === 'settled') {
+    syncHud();
+    // spare detection in the 10th frame is a little special, but in general:
+    const prev = game.rolls[game.rolls.length - 2];
+    const frameBall = game.ballInFrame; // already incremented by planAdvance
+    const isSpare = frameBall === 2 && prev !== 10 && (prev + e.pinsDown === 10)
+      || (frameBall === 3); // 10th-frame bonus conversion handled loosely
+    if (e.pinsDown === 10 && frameBall !== 3) { audio.play('bw-strike'); shake = 1; }
+    else if (isSpare && e.pinsDown !== 10) audio.play('bw-spare');
+    else if (e.pinsDown === 0) audio.play('bw-gutter');
+    else audio.play('bw-pins', { pins: e.pinsDown });
+    const label = e.pinsDown === 10 ? 'STRIKE!'
+      : (frameBall === 2 && prev !== 10 && prev + e.pinsDown === 10) ? 'SPARE!'
+      : e.pinsDown === 0 ? 'GUTTER' : `${e.pinsDown} pin${e.pinsDown === 1 ? '' : 's'}`;
+    $('banner').textContent = label;
+    $('banner').classList.add('on');
+    clearTimeout(handleEvent.t);
+    handleEvent.t = setTimeout(() => $('banner').classList.remove('on'), 1300);
+  } else if (e.type === 'sweep') {
+    audio.play('bw-sweep');
+  } else if (e.type === 'frame') {
+    rebuildPins();
+    syncHud();
+  } else if (e.type === 'over') {
+    // Persist best and unlocks.
+    const prevBest = bowlSave.best[game.pattern.id] || 0;
+    if (e.score > prevBest) bowlSave.best[game.pattern.id] = e.score;
+    const hi = Math.max(...Object.values(bowlSave.best), 0);
+    const unlocked = 1 + PATTERNS.filter((p, i) => i > 0 && hi >= p.unlockAt).length;
+    bowlSave.unlocked = Math.max(bowlSave.unlocked, Math.min(PATTERNS.length, unlocked));
+    persistBowlSave(bowlSave);
+
+    $('panel').innerHTML = `<h1>🎳 <em>Game over</em></h1>
+      <p>${game.pattern.emoji} ${game.pattern.name} lane — final score <strong>${e.score}</strong> / 300.</p>
+      <div id="patterns"></div>
+      <div class="cta"><strong>A</strong> play again · <strong>↑↓</strong> pick lane · <strong>B</strong> menu</div>`;
+    syncPatterns();
+    $('overlay').classList.remove('hide');
+    channel.feedback({ type: 'slice', combo: 3 });
+    audio.play('bw-gameover');
+  }
 }
 
 // ── Loop ───────────────────────────────────────────────────────────────────
 let last = performance.now();
 let fps = 0; let frames = 0; let fpsMark = last;
+
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  if (e.key === 'ArrowUp') { e.preventDefault(); changePattern(-1); }
+  if (e.key === 'ArrowDown') { e.preventDefault(); changePattern(1); }
+  // desk-test: space/enter starts (handled by channel) or delivers a straight
+  // medium ball while aiming
+  if ((e.key === 'r' || e.key === 'R') && started && game.state === 'aim') {
+    game.roll(0.7, undefined, 0);
+    channel.audio.play('bw-release');
+    flashPower(0.7, 0);
+  }
+});
+window.addEventListener('keyup', (e) => { keys[e.key] = false; });
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -322,9 +487,12 @@ function frame(now) {
 
   const aim = channel.poll(now);
   if (game.state === 'aim') game.aimOffset = (aim.x - 0.5) * 0.9;
+
+  // Desk-test fallback: mouse click to bowl a straight shot at pointer aim.
+  // (pointerdown already fires onA for start; here we let a click during aim
+  // deliver if no swing came in recently — handled by R key above for clarity.)
+
   game.update(now, dt);
-  // The 10th frame's bonus-ball rack reset (logic.js) fires no event of its
-  // own — catch any pins[] swap here rather than missing that one case.
   if (game.pins !== pinsRef) rebuildPins();
   burst.update(dt);
   step(now, dt);
@@ -334,35 +502,78 @@ function frame(now) {
 function step(now, dt) {
   const b = game.ball;
   ball.position.set(b.x, 0.13, b.z);
-  ball.rotation.x += dt * 8 * (1 + Math.hypot(b.vx, b.vz) * 0.3);
+  const speed = Math.hypot(b.vx, b.vz);
+  // Roll the ball visually: forward roll + a little side spin lean.
+  ball.rotation.x -= speed * dt / 0.13;
+  ball.rotation.z = b.spin * 0.35;
 
+  // Pins: fall in the direction they were struck.
   for (let i = 0; i < game.pins.length; i += 1) {
     const p = game.pins[i];
     const mesh = pinMeshes[i];
-    const fall = pinFall[i];
-    if (!p.standing && fall.t < 1) fall.t = Math.min(1, fall.t + dt * 2.6);
-    else if (p.standing) fall.t = 0;
+    if (!mesh) continue;
+    let fall = pinFall[i];
+    if (!fall) { fall = pinFall[i] = { t: 0, ax: 0, dir: 1 }; }
+    if (!p.standing && fall.t < 1) {
+      fall.t = Math.min(1, fall.t + dt * (2.4 + (p.impact || 0) * 0.08));
+      if (fall.ax === 0) fall.ax = p.fallAxis || 0;
+    } else if (p.standing) {
+      fall.t = 0; fall.ax = 0;
+    }
     const ease = fall.t * fall.t * (3 - 2 * fall.t);
     mesh.position.set(p.x, 0, p.z);
-    mesh.rotation.set(ease * (Math.PI / 2) * fall.dir, 0, ease * 0.6 * fall.dir);
-    mesh.position.y = -ease * 0.05;
+    mesh.rotation.set(0, 0, 0);
+    // Topple around an axis perpendicular to the fall direction.
+    mesh.rotateY(-fall.ax);
+    mesh.rotateX(-ease * (Math.PI / 2));
+    mesh.rotateY(fall.ax);
+    mesh.position.y = -ease * 0.04;
   }
 
+  // Sweep bar animation.
+  if (game.state === 'sweep') {
+    sweepBar.visible = true;
+    const t = Math.min(1, game.sweepMs / 750);
+    // glide forward over the pins then back
+    const go = t < 0.55 ? t / 0.55 : 1 - (t - 0.55) / 0.45;
+    sweepBar.position.set(0, 0.22, HEADPIN_Z - 0.6 + go * 1.8);
+  } else {
+    sweepBar.visible = false;
+  }
+
+  // Aim arrow and hook preview while aiming.
   aimArrow.visible = started && game.state === 'aim';
+  hookLine.visible = aimArrow.visible;
   if (aimArrow.visible) {
     const ax = Math.sin(game.aimOffset) * 1.2;
     const az = Math.cos(game.aimOffset) * 1.2;
     aimArrow.position.set(ax, 0.3, az);
     aimArrow.rotation.z = -game.aimOffset;
+    // Preview arc: simulate a gentle hook from the remembered release.
+    const pts = [];
+    const h = lastHookHint * 0.5;
+    let px = 0; let pz = 0; let vx = Math.sin(game.aimOffset); let vz = Math.cos(game.aimOffset);
+    for (let i = 0; i < 28; i += 1) {
+      pts.push(new THREE.Vector3(px, 0.02, pz));
+      px += vx * 0.55; pz += vz * 0.55;
+      vx += h * 0.03; // curve
+      if (pz > HEADPIN_Z - 0.4) break;
+    }
+    hookLine.geometry.dispose();
+    hookLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
   }
 
   shake = Math.max(0, shake - dt * 2.2);
+  shakeCam = shake;
   const back = 3.4;
-  const cz = game.state === 'aim' ? -back : Math.max(-back, b.z - 2.2);
-  camera.position.lerp(new THREE.Vector3(0, 1.1, cz), Math.min(1, dt * 3));
-  camera.position.x += (Math.random() - 0.5) * 0.04 * shake;
-  camera.position.y += (Math.random() - 0.5) * 0.03 * shake;
-  camera.lookAt(0, 0.3, HEADPIN_Z);
+  let camZ = -back;
+  if (game.state === 'roll') camZ = Math.max(-back, b.z - 2.4);
+  else if (game.state === 'sweep') camZ = Math.max(-back, HEADPIN_Z - 3.5);
+  camera.position.lerp(new THREE.Vector3(0, 1.15, camZ), Math.min(1, dt * 3));
+  camera.position.x += (Math.random() - 0.5) * 0.04 * shakeCam;
+  camera.position.y += (Math.random() - 0.5) * 0.03 * shakeCam;
+  const lookZ = game.state === 'aim' ? HEADPIN_Z : Math.min(HEADPIN_Z, Math.max(4, b.z + 3));
+  camera.lookAt(0, 0.3, lookZ);
 
   pinGlow.intensity = 0.8 + Math.sin(now / 400) * 0.1;
 }
@@ -382,21 +593,28 @@ setInterval(() => {
   $('debug').textContent = [
     `fps       ${fps.toFixed(0)}`,
     `state     ${game.state} · frame ${game.frameIndex + 1} ball ${game.ballInFrame + 1}`,
-    `ball      ${game.ball.x.toFixed(2)}, ${game.ball.z.toFixed(2)}`,
-    `standing  ${game.standingCount()}`,
+    `ball      ${game.ball.x.toFixed(2)}, ${game.ball.z.toFixed(2)} spin ${game.ball.spin.toFixed(2)}`,
+    `standing  ${game.standingCount()} · pattern ${game.pattern.id}`,
+    `hook mem  ${lastHookHint.toFixed(2)}`,
     `gyro map  ${channel.pointer.describeMap()}`,
     `sensor    ${channel.link.rate.toFixed(0)} Hz`,
   ].join('\n');
 }, 250);
 
-resize();
+applyPattern(0);
+syncPatterns();
 syncHud();
-camera.position.set(0, 1.1, -3.4);
+resize();
+camera.position.set(0, 1.15, -3.4);
 camera.lookAt(0, 0.3, HEADPIN_Z);
+
+if (launchData && launchData.splash) {
+  launchData.splash.addEventListener('animationend', () => launchData.splash.remove(), { once: true });
+}
 requestAnimationFrame(frame);
 
 window.__senwii = {
-  get game() { return game; },   // startGame() replaces the instance; stay live across restarts
+  get game() { return game; },
   channel, pointer: channel.pointer, scene, camera, renderer, step, startGame,
   fps: () => fps,
 };
