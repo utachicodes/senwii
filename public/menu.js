@@ -168,7 +168,6 @@ function updateTicker() {
   const text = `${n} CONTROLLER${n === 1 ? '' : 'S'} CONNECTED &middot; STREAM ${rate} &middot; RTT ${rtt} &middot; `
     + `${games.length} GAME${games.length === 1 ? '' : 'S'} AVAILABLE &middot; `;
   $('ticker-text').innerHTML = text.repeat(3);
-  $('r-rate').textContent = link.rate ? `${link.rate.toFixed(0)}Hz` : '–';
   $('t-rate').textContent = link.rate ? `${link.rate.toFixed(0)}Hz` : '–';
 }
 setInterval(updateTicker, 1000);
