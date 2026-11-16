@@ -68,6 +68,9 @@ jobs:
             set -e
             cd /opt/senwii
             git fetch origin
-            git merge --ff-only origin/main
+            # Never discard hand edits made on the server to tracked files.
+            git diff --quiet HEAD || { echo "Uncommitted changes in /opt/senwii; refusing to deploy"; git status --short; exit 1; }
+            # Match GitHub exactly, even after a rewritten (force-pushed) main.
+            git reset --hard origin/main
             docker compose -f docker-compose.vps.yml up -d --build senwii
             docker image prune -f
