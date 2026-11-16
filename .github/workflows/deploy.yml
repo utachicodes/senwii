@@ -2,9 +2,13 @@ name: Deploy to VPS
 
 # Pushing to main pulls the new commit onto the VPS and rebuilds just the
 # senwii app container (not the Caddy container sitting in front of it, so
-# the TLS cert/config it holds is never touched by a deploy).
+# the TLS cert/config it holds is never touched by a deploy). Tests run on
+# every push and PR; the deploy job only runs after they pass, so a broken
+# commit never reaches the live site.
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch: {}
 
@@ -13,7 +17,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:unit
+
   deploy:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       # VPS_SSH_KEY_B64 is the private key, base64-encoded to one line —
