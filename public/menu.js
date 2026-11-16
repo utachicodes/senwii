@@ -128,7 +128,11 @@ const link = new GameLink({
     updateTicker();
   },
 });
-link.onLatency = (ms) => { latencyMs = ms; updateTicker(); };
+link.onLatency = (ms) => {
+  latencyMs = ms;
+  for (const inp of inputs.values()) inp.pointer.setNetworkRtt(ms);
+  updateTicker();
+};
 setInterval(() => link.probeLatency(), 4000);
 
 function activeTelemetrySlot() {

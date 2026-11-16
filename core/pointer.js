@@ -115,6 +115,14 @@ export class Pointer {
     // at packet cadence — its winning tau was secretly no smoothing at all,
     // which shipped raw gyro noise into the lead and jittered fast swings.
     this.leadTau = 0.02;
+    // One-way phone→screen network delay in seconds, from the relay's
+    // measured RTT (see core/channel.js). 0 = LAN / unmeasured.
+    this.networkLatency = options.networkLatency ?? 0;
+    this.netTau = options.netTau ?? 0.04;
+    this.emaRateNet = { x: 0, y: 0 };
+    this.netEase = options.netEase ?? 0.08;
+    this.netGain = options.netGain ?? 0.4;
+    this.netOff = { x: 0, y: 0 };
     this.emaRate = { x: 0, y: 0 };         // smoothed screen-rate for the lead
     this.emaAbsDps = 0;                    // smoothed |rate|, gates the ramp
 
@@ -176,6 +184,14 @@ export class Pointer {
   get display() { return this.pos; }
   get position() { return this.pos; }
   get pixels() { return { x: this.pos.x * this.w, y: this.pos.y * this.h }; }
+
+  /** Feed a measured round trip (ms). Halved to one-way and smoothed, so a
+   *  single slow probe can't yank the lead horizon around mid-swing. */
+  setNetworkRtt(ms) {
+    if (!(ms >= 0)) return;
+    const oneWay = Math.min(ms, 500) / 2000;
+    this.networkLatency += (oneWay - this.networkLatency) * (this.networkLatency ? 0.3 : 1);
+  }
 
   setViewport(w, h) {
     this.w = Math.max(1, w);
@@ -434,6 +450,12 @@ export class Pointer {
     this.emaRate.x += (this.rate.x - this.emaRate.x) * kE;
     this.emaRate.y += (this.rate.y - this.emaRate.y) * kE;
     this.emaAbsDps += (Math.max(Math.abs(yawDps), Math.abs(pitchDps)) - this.emaAbsDps) * kE;
+    // The network part of the lead extrapolates ~100ms, 3-5x the local
+    // horizon, so the same per-packet noise would land 3-5x larger on
+    // screen. It gets its own, heavier smoothing.
+    const kN = 1 - Math.exp(-dt / this.netTau);
+    this.emaRateNet.x += (this.rate.x - this.emaRateNet.x) * kN;
+    this.emaRateNet.y += (this.rate.y - this.emaRateNet.y) * kN;
   }
 
   /** Reported gyro → true body rates through the learned map. */
@@ -495,6 +517,26 @@ export class Pointer {
           const lead = horizon * ramp;
           this.pos.x = clamp(this.pos.x + this.emaRate.x * lead, 0, 1);
           this.pos.y = clamp(this.pos.y + this.emaRate.y * lead, 0, 1);
+        }
+        // Online, the one-way network transit (networkLatency, from the
+        // measured RTT) dwarfs the local pipeline the lead above covers, so
+        // it gets its own term, capped so slow links can't overshoot
+        // reversals. The rate only changes when a packet lands, so a lead
+        // this long would jump once per packet, a staircase 3-5x bigger than
+        // the LAN lead's; easing it at display rate turns steps into ramps
+        // (and eases back to zero when the hand stops). Only netGain (40%)
+        // of the delay is extrapolated: a sweep against a simulated 100ms
+        // link measured that as MORE accurate than leading the full delay
+        // (which overshoots every reversal) and the only range that keeps
+        // shimmer inside the LAN lead's own test bounds. At networkLatency 0,
+        // LAN or unmeasured, this term is exactly zero.
+        const net = clamp(this.networkLatency * this.netGain, 0, 0.05);
+        if (net > 0) {
+          const kD = 1 - Math.exp(-dt / this.netEase);
+          this.netOff.x += (this.emaRateNet.x * net * ramp - this.netOff.x) * kD;
+          this.netOff.y += (this.emaRateNet.y * net * ramp - this.netOff.y) * kD;
+          this.pos.x = clamp(this.pos.x + this.netOff.x, 0, 1);
+          this.pos.y = clamp(this.pos.y + this.netOff.y, 0, 1);
         }
       }
     }

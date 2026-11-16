@@ -958,6 +958,10 @@ const link = new GameLink({
   },
 });
 
+// Lead every blade by the measured network delay (see Pointer.setNetworkRtt).
+link.onLatency = (ms) => { for (const inp of inputs.values()) inp.pointer.setNetworkRtt(ms); };
+setInterval(() => link.probeLatency(), 3000);
+
 // ── DOM effects: splash text, the red miss ✗, the bomb flash ──────────────
 function splash(worldX, worldY, text, cls = '', colour = null) {
   const el = document.createElement('div');

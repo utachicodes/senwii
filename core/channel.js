@@ -60,6 +60,11 @@ export function createChannel({
     },
   });
 
+  // Measure the real phone↔screen round trip so the pointer's dead-reckoning
+  // can lead by the actual network delay, not just the LAN-scale pipeline.
+  link.onLatency = (ms) => pointer.setNetworkRtt(ms);
+  setInterval(() => link.probeLatency(), 3000);
+
   const mouse = { x: 0.5, y: 0.5, active: false };
   window.addEventListener('mousemove', (e) => {
     mouse.x = e.clientX / window.innerWidth;

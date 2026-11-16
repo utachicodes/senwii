@@ -498,6 +498,53 @@ test('display lead does not shimmer: noisy gyro, smooth cursor', () => {
     `fast swings stay clean: ${(frOn * 1e4).toFixed(2)} vs ${(frOff * 1e4).toFixed(2)} (×1e-4/frame²)`);
 });
 
+test('network latency lead: tighter tracking over a slow link, unchanged on LAN', () => {
+  // Online play adds real one-way transit (~100ms at 200ms RTT) that the
+  // LAN-tuned horizon never covered. Feeding the measured delay in must
+  // tighten tracking over that link, and must be exactly a no-op at 0.
+  const slow = { ...WANDER, secs: 6, packetDelayMs: 100 };
+  const lan = drive(slow);
+  const tuned = drive({ ...slow, pointer: new Pointer({ degPerScreen: 30, networkLatency: 0.1 }) });
+  const errLan = yawError(lan.track, 3000);
+  const errTuned = yawError(tuned.track, 3000);
+  assert.ok(errTuned < errLan * 0.8,
+    `latency-aware lead tracks better: ${(errTuned * 100).toFixed(2)}% vs ${(errLan * 100).toFixed(2)}%`);
+
+  // ...without the longer lead turning into shimmer: held to the same bounds
+  // the LAN lead is (see "display lead does not shimmer").
+  let seed = 11;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff - 0.5; };
+  const noisy = (w) => [w.x + rnd() * 10, w.y + rnd() * 10, w.z + rnd() * 10];
+  const rough = (track) => {
+    let s = 0; let n = 0;
+    for (let i = 2; i < track.length; i += 1) {
+      if (track[i].ms < 3000) continue;
+      s += Math.abs(track[i].x - 2 * track[i - 1].x + track[i - 2].x); n += 1;
+    }
+    return s / n;
+  };
+  for (const [yaw, bound] of [
+    [(t) => 10 * Math.sin(2 * Math.PI * 0.7 * t), 1.35],
+    [(t) => 13 * Math.sin(2 * Math.PI * 1.2 * t), 1.7],
+  ]) {
+    const run = (pointer) => { seed = 11; return rough(drive({ yaw, secs: 6, device: noisy, packetDelayMs: 100, pointer }).track); };
+    const off = run(new Pointer({ degPerScreen: 30, displayLead: false }));
+    const on = run(new Pointer({ degPerScreen: 30, networkLatency: 0.1 }));
+    assert.ok(on < off * bound, `no shimmer over a slow link: ${(on * 1e4).toFixed(2)} vs ${(off * 1e4).toFixed(2)}`);
+  }
+
+  const a = drive({ ...WANDER, secs: 4, packetDelayMs: 30 });
+  const b = drive({ ...WANDER, secs: 4, packetDelayMs: 30, pointer: new Pointer({ degPerScreen: 30, networkLatency: 0 }) });
+  const maxDiff = Math.max(...a.track.map((r, i) => Math.abs(r.x - b.track[i].x)));
+  assert.ok(maxDiff < 1e-9, 'zero latency is bit-identical to the old behaviour');
+
+  const p = new Pointer({});
+  p.setNetworkRtt(200);
+  assert.ok(Math.abs(p.networkLatency - 0.1) < 1e-9, 'first RTT seeds one-way directly');
+  p.setNetworkRtt(400);
+  assert.ok(p.networkLatency > 0.1 && p.networkLatency < 0.2, 'later RTTs are smoothed');
+});
+
 test('the default pointer speed is the rebased 20°-per-screen (old 150%)', () => {
   assert.equal(new Pointer({}).degPerScreen, 20);
   assert.equal(new Pointer({}).sensitivity, 1);
