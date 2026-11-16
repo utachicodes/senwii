@@ -40,11 +40,33 @@ jobs:
       # matter how the paste reflows it, and the grep after is a loud,
       # key-safe check that decoding actually produced a real key instead of
       # failing silently into an empty/garbage file.
+      #
+      # The secret may hold EITHER the base64 of the key file OR the raw key
+      # (-----BEGIN OPENSSH PRIVATE KEY----- ...) pasted as-is: both are easy
+      # to end up with, and only one used to work. It is read through env,
+      # never pasted into the script, so a raw key keeps its newlines.
       - name: Decode deploy key
+        env:
+          KEY_SECRET: ${{ secrets.VPS_SSH_KEY_B64 }}
         run: |
-          echo "${{ secrets.VPS_SSH_KEY_B64 }}" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/deploy_key"
-          # OpenSSH rejects a key whose last line has no newline ("invalid format").
-          [ -n "$(tail -c1 "$RUNNER_TEMP/deploy_key")" ] && echo >> "$RUNNER_TEMP/deploy_key"
+          # 1. Raw key or base64 of it? Either way, get the key text.
+          if printf '%s' "$KEY_SECRET" | tr -d '[:space:]' | grep -q "BEGINOPENSSHPRIVATEKEY"; then
+            echo "secret format: raw key"
+            text=$(printf '%s' "$KEY_SECRET")
+          else
+            echo "secret format: base64"
+            text=$(printf '%s' "$KEY_SECRET" | tr -d '[:space:]' | base64 -d 2>/dev/null || true)
+          fi
+          # 2. Rebuild the exact PEM layout OpenSSH expects, whatever a paste
+          #    did to it (newlines lost, spaces stripped, CRLF, no final
+          #    newline): header, body in 70-char lines, footer.
+          body=$(printf '%s' "$text" | tr -d '[:space:]' \
+            | sed -e 's/-----BEGINOPENSSHPRIVATEKEY-----//' -e 's/-----ENDOPENSSHPRIVATEKEY-----//')
+          if [ -n "$body" ]; then
+            { echo "-----BEGIN OPENSSH PRIVATE KEY-----"; printf '%s' "$body" | fold -w 70; echo; echo "-----END OPENSSH PRIVATE KEY-----"; } > "$RUNNER_TEMP/deploy_key"
+          else
+            : > "$RUNNER_TEMP/deploy_key"
+          fi
           chmod 600 "$RUNNER_TEMP/deploy_key"
           echo "decoded key size: $(wc -c < "$RUNNER_TEMP/deploy_key") bytes"
           grep -q "BEGIN OPENSSH PRIVATE KEY" "$RUNNER_TEMP/deploy_key" || { echo "::error::decoded file is not a valid OpenSSH private key — check the VPS_SSH_KEY_B64 secret"; exit 1; }
