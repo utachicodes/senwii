@@ -58,6 +58,19 @@ test('two separated slashes are two swings', () => {
   assert.ok(swings[0].angle < 0 && swings[1].angle > 0, 'opposite directions');
 });
 
+test('a swing reports its travel vector (vx, vy) — finite, matching its angle', () => {
+  // A mostly-downward swing with a rightward lean (yaw− = right in cursor x).
+  const profile = [];
+  for (let i = 0; i < 15; i += 1) profile.push([-120, -300]);
+  for (let i = 0; i < 10; i += 1) profile.push([0, 0]);
+  const [s] = feed(profile);
+  assert.ok(s, 'one swing');
+  assert.ok(Number.isFinite(s.vx) && Number.isFinite(s.vy), 'vx/vy present and finite');
+  assert.ok(s.vx > 0 && s.vy > 0, 'right and down in cursor space');
+  assert.ok(Math.abs(Math.atan2(s.vy, s.vx) - s.angle) < 1e-9, 'angle is the direction of (vx, vy)');
+  assert.ok(Math.abs(s.vx / Math.hypot(s.vx, s.vy) - 120 / Math.hypot(120, 300)) < 0.02, 'sideways share');
+});
+
 test('lineDiff treats a blade and its flip as the same line', () => {
   assert.ok(lineDiff(0.2, 0.2 + Math.PI) < 1e-9);
   assert.ok(Math.abs(lineDiff(0, Math.PI / 2) - Math.PI / 2) < 1e-9);

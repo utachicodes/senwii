@@ -252,10 +252,42 @@ function flush() {
   sent += 1;
 }
 
+// ── Gyro integrated on the phone's own clock ──────────────────────────────
+// Each sensor event's rotation is accumulated here, timed by the SENSOR's
+// timestamps, and the running totals ride along on every packet. The PC
+// takes the difference between consecutive packets, so it gets exactly the
+// rotation that happened between them — no matter how Wi-Fi bunched,
+// delayed or spaced the packets, and including events the send-rate cap
+// below skipped. Integrating "latest rate × screen frame time" on the PC
+// instead loses every intermediate sample in a bunch: that loss was drift.
+const gyroInt = { x: 0, y: 0, z: 0, t: 0 };   // reported-units·s, seconds
+let gyroPrev = null;                          // { x, y, z, ts } last event
+
+function integrateGyro(rx, ry, rz, e) {
+  const ts = typeof e.timeStamp === 'number' && e.timeStamp > 0 ? e.timeStamp : performance.now();
+  if (gyroPrev) {
+    let dt = (ts - gyroPrev.ts) / 1000;
+    // A pause (backgrounded tab, sensor hiccup) is not motion: bridge it with
+    // the event interval the browser reports instead of a huge step.
+    const nominal = e.interval > 0 ? (e.interval > 1 ? e.interval / 1000 : e.interval) : 1 / 60;
+    if (!(dt > 0) || dt > 0.25) dt = Math.min(nominal, 0.05);
+    // Trapezoid: the rate moved linearly between the two readings.
+    gyroInt.x += 0.5 * (gyroPrev.x + rx) * dt;
+    gyroInt.y += 0.5 * (gyroPrev.y + ry) * dt;
+    gyroInt.z += 0.5 * (gyroPrev.z + rz) * dt;
+    gyroInt.t += dt;
+  }
+  gyroPrev = { x: rx, y: ry, z: rz, ts };
+}
+
 function onMotion(e) {
   const a = e.acceleration || e.accelerationIncludingGravity;
   const r = e.rotationRate;
   if (!a && !r) return;
+  const rz = r ? r.alpha || 0 : 0;
+  const rx = r ? r.beta || 0 : 0;
+  const ry = r ? r.gamma || 0 : 0;
+  if (r) integrateGyro(rx, ry, rz, e);
   motion = {
     ax: a ? a.x || 0 : 0,
     ay: a ? a.y || 0 : 0,
@@ -264,9 +296,11 @@ function onMotion(e) {
     // attitude estimate and carries that fusion's latency — this is a direct
     // readout of angular velocity, and it is what makes the cursor feel
     // immediate. The PC integrates it and corrects against orientation.
-    rz: r ? r.alpha || 0 : 0,
-    rx: r ? r.beta || 0 : 0,
-    ry: r ? r.gamma || 0 : 0,
+    rz,
+    rx,
+    ry,
+    // Running gyro integrals + the sensor-clock time they cover (see above).
+    ...(r ? { ix: gyroInt.x, iy: gyroInt.y, iz: gyroInt.z, it: gyroInt.t } : {}),
   };
   // Send on the motion event too. Gating the gyro behind orientation events
   // would throw away exactly the freshness we're here for.
@@ -344,7 +378,7 @@ function startGenericSensor() {
     // extra Hz shortens the packet interval the PC's dead reckoning covers.
     genericSensor = new Ctor({ frequency: 120, referenceFrame: 'device' });
   } catch (err) {
-    renderDiagnostics('⚠️ Sensor unavailable', SENSOR_ERRORS[err.name] || err.message);
+    renderDiagnostics('Sensor unavailable', SENSOR_ERRORS[err.name] || err.message);
     return false;
   }
 
@@ -361,14 +395,14 @@ function startGenericSensor() {
 
   genericSensor.addEventListener('error', (ev) => {
     const name = ev.error && ev.error.name;
-    renderDiagnostics('⚠️ Sensor error', SENSOR_ERRORS[name] || `${name}: ${ev.error && ev.error.message}`);
+    renderDiagnostics('Sensor error', SENSOR_ERRORS[name] || `${name}: ${ev.error && ev.error.message}`);
   });
 
   try {
     genericSensor.start();
     return true;
   } catch (err) {
-    renderDiagnostics('⚠️ Sensor unavailable', SENSOR_ERRORS[err.name] || err.message);
+    renderDiagnostics('Sensor unavailable', SENSOR_ERRORS[err.name] || err.message);
     return false;
   }
 }
@@ -380,14 +414,14 @@ async function requestSensors() {
   // Refuse to pretend. Without a secure context nothing below can ever fire.
   if (!caps.secureContext) {
     await renderDiagnostics(
-      '⚠️ Not a secure page',
+      'Not a secure page',
       `This page is served from ${location.origin}, which browsers treat as insecure — motion sensors are blocked outright. Restart the server with "npm start" (HTTPS) and open the https:// address instead.`,
     );
     throw new Error('needs HTTPS for sensors');
   }
 
   if (!caps.deviceOrientationEvent && !caps.absoluteOrientationSensor && !caps.relativeOrientationSensor) {
-    await renderDiagnostics('⚠️ No orientation API', 'This browser exposes no orientation sensor API at all.');
+    await renderDiagnostics('No orientation API', 'This browser exposes no orientation sensor API at all.');
     throw new Error('no orientation API');
   }
 
@@ -412,7 +446,7 @@ async function requestSensors() {
     if (rawEvents > 0) return;
     if (!startGenericSensor()) {
       renderDiagnostics(
-        '⚠️ No sensor data',
+        'No sensor data',
         'No orientation events fired and no fallback sensor is available. Check Chrome → Settings → Site settings → Motion sensors.',
       );
     }
@@ -524,8 +558,15 @@ onPress(els.btnPlus, () => socket.emit('command', { type: 'speed', factor: 1.12 
 onPress(els.btn1, () => socket.emit('command', { type: 'recentre' }), 8);
 onPress(els.btn2, () => els.sheet.classList.toggle('open'), 8);
 onPress(els.power, () => speakerTalk(250), [5, 30, 10]);
+// The crosspad drives menus (level / song / pattern / track pickers). In the
+// default upright layout the pad is unrotated, so the button is the direction.
 for (const dp of document.querySelectorAll('.dp')) {
-  if (dp.tagName === 'BUTTON') onPress(dp, () => {}, 6);
+  if (dp.tagName !== 'BUTTON') continue;
+  const dir = dp.classList.contains('u') ? 'up' : dp.classList.contains('d') ? 'down'
+    : dp.classList.contains('l') ? 'left' : dp.classList.contains('r') ? 'right' : null;
+  onPress(dp, () => {
+    if (dir) socket.emit('command', { type: 'button', button: dir, menuDirection: dir });
+  }, 6);
 }
 
 // A short renewable profile lease prevents a closed game leaving a phone in
@@ -663,7 +704,7 @@ function updateDiagnostics(now, elapsed) {
     // stomp on them with a generic message.
     if (!els.diag.classList.contains('hide')) return;
     renderDiagnostics(
-      '⚠️ No sensor data',
+      'No sensor data',
       rawEvents > 0
         ? 'Orientation events are firing but arriving empty. Move the phone in a figure-8 to settle its compass.'
         : 'No orientation events are firing. On iOS: Settings → Apps → Safari → Motion & Orientation Access. On Chrome: ⋮ → Settings → Site settings → Motion sensors.',
@@ -733,10 +774,10 @@ document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: fal
 // Preflight: an insecure origin can never read sensors, so say so up front
 // rather than letting the player tap Enable and watch nothing happen.
 if (!window.isSecureContext) {
-  els.enable.textContent = '⚠️ Sensors need HTTPS';
+  els.enable.textContent = 'Sensors need HTTPS';
   els.enable.disabled = true;
   renderDiagnostics(
-    '⚠️ Not a secure page',
+    'Not a secure page',
     `Served from ${location.origin}. Browsers block motion sensors on insecure origins — and they do it silently. Restart with "npm start" (HTTPS) and open the https:// address.`,
   );
 }

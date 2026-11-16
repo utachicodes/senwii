@@ -8,6 +8,7 @@ import { gripTilt, axesFromSample } from '../../core/orientation.js';
 import {
   Flight, islandHeight, SEA_LEVEL, POINT_COUNT,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Island Flyover — renderer. Hold the phone like a paper plane: bank to turn,
@@ -144,7 +145,7 @@ function handleEvent(e) {
     syncHud();
   } else if (e.type === 'done') {
     const s = (e.ms / 1000).toFixed(1);
-    $('panel').innerHTML = `<h1>🛩 <em>Full sweep!</em></h1>
+    $('panel').innerHTML = `<h1>${icon('plane')} <em>Full sweep!</em></h1>
       <p>All ${POINT_COUNT} i-points in ${s}s.</p>
       <div class="cta"><strong>A</strong> fly again · <strong>B</strong> menu</div>`;
     $('overlay').classList.remove('hide');
@@ -232,3 +233,5 @@ window.__senwii = {
   flight, channel, pointer: channel.pointer, scene, camera, renderer, step,
   startFlight, ringMeshes, fps: () => fps,
 };
+
+hydrateIcons();

@@ -1,7 +1,7 @@
 {
   "title": "Air Hockey",
   "tagline": "Point to move your mallet. Defend your goal, pot the puck in theirs. First to 7.",
-  "emoji": "🏒",
+  "icon": "puck",
   "players": 1,
   "order": 6
 }

@@ -15,6 +15,7 @@ export class DanceMusic {
     this.nextTime = 0;
     this.step = 0;
     this.playing = false;
+    this.startTime = null;      // ctx time of step 0 while playing
   }
 
   setBpm(bpm) { this.bpm = bpm; }
@@ -27,6 +28,9 @@ export class DanceMusic {
     this.playing = true;
     this.step = 0;
     this.nextTime = a.ctx.currentTime + 0.05;
+    // Step 0 = song time 0. The game reads its chart clock off this so the
+    // notes and the beat share one clock (see SongClock in game.js).
+    this.startTime = this.nextTime;
     const tick = () => {
       if (!this.playing || !a.ctx) return;
       const beat = 60 / this.bpm;

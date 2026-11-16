@@ -30,8 +30,10 @@ export class SwingDetector {
   }
 
   /**
-   * Feed one rate sample. Returns a swing {angle, peak, travel, durationMs}
-   * when one completes, else null.
+   * Feed one rate sample. Returns a swing {angle, peak, travel, durationMs,
+   * vx, vy} when one completes, else null. `vx`/`vy` are the swing's net
+   * angular travel in cursor space (degrees, +x right, +y down) — the vector
+   * whose direction is `angle`; games read its sideways share (e.g. hook).
    */
   update({ yaw = 0, pitch = 0 }, dt, now) {
     const mag = Math.hypot(yaw, pitch);
@@ -65,6 +67,8 @@ export class SwingDetector {
           peak: this.peak,
           travel: this.travel,
           durationMs: now - this.startedAt,
+          vx: this.vx,
+          vy: this.vy,
         };
       }
       return null;

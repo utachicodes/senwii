@@ -20,6 +20,7 @@ export function createChannel({
   onCommand = () => {},
   onSample = null,          // (sample, dt, now) — raw attitude for tilt games
   room = null,              // reclaim the menu's relay room (see core/splash.js)
+  deskKeys = true,          // ←/→ sensitivity + D debug; off for games that play on those keys
 } = {}) {
   const $ = (id) => document.getElementById(id);
   const pointer = new Pointer({});
@@ -27,14 +28,22 @@ export function createChannel({
   const audio = new AudioEngine();
 
   let lastSampleAt = 0;
+  let lastPhoneT = null;
   let lastSample = null;
 
   const link = new GameLink({
     room,
     onOrientation: (sample) => {
       const now = performance.now();
-      const dt = lastSampleAt ? clamp((now - lastSampleAt) / 1000, 1 / 240, 0.1) : 1 / 60;
+      let dt = lastSampleAt ? clamp((now - lastSampleAt) / 1000, 1 / 240, 0.1) : 1 / 60;
       lastSampleAt = now;
+      // Prefer the phone's own send-time spacing: arrivals bunch on Wi-Fi,
+      // and tilt filters / swing detectors integrate over this dt.
+      if (Number.isFinite(sample.t)) {
+        const phoneDt = lastPhoneT === null ? NaN : (sample.t - lastPhoneT) / 1000;
+        lastPhoneT = sample.t;
+        if (phoneDt > 0 && phoneDt < 0.1) dt = phoneDt;
+      }
       lastSample = sample;
       pointer.update(sample, dt, now);
       if (onSample) onSample(sample, dt, now);
@@ -72,6 +81,8 @@ export function createChannel({
     mouse.active = true;
   });
   window.addEventListener('pointerdown', (e) => {
+    // A click on a link (e.g. "← Games") is navigation, not a press of A.
+    if (e.target && e.target.closest && e.target.closest('a')) return;
     // A click IS a position report — some input paths (touch, synthetic
     // clicks) never send the mousemove first, so take it from the press.
     if (Number.isFinite(e.clientX)) {
@@ -85,9 +96,15 @@ export function createChannel({
 
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); audio.unlock(); onA(); }
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      // Auto-repeat is "still holding", not a fresh press — a held drift key
+      // must not restart a race the instant it finishes.
+      if (!e.repeat) { audio.unlock(); onA(); }
+    }
     else if (k === 'b' || e.key === 'Escape') (onB || (() => goHome(audio, link.room)))();
     else if (k === 'c' || k === 'r') pointer.recentre();
+    else if (!deskKeys) return;
     else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();
       const step = e.key === 'ArrowRight' ? 1.12 : 1 / 1.12;

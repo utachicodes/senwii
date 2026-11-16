@@ -1,7 +1,7 @@
 {
   "title": "Golf",
   "tagline": "One par-4. Swing the phone like a club.",
-  "emoji": "⛳",
+  "icon": "golf",
   "players": 1,
   "hidden": true
 }

@@ -7,6 +7,7 @@ import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { ParticleBurst, dotTexture, canvasTexture } from '../shared/fx.js';
 import { Bout, AI, ZONE, zoneOfSwing } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Boxing — renderer. The bout runs in logic.js (HIGH/LOW zones instead of
@@ -283,7 +284,7 @@ function handleEvent(e) {
       break;
     case 'over': {
       const won = e.winner === 'player';
-      $('panel').innerHTML = `<h1>${won ? '🏆 <em>You win!</em>' : '💀 <em>Defeated</em>'}</h1>
+      $('panel').innerHTML = `<h1>${won ? `${icon('trophy')} <em>You win!</em>` : `${icon('skull')} <em>Defeated</em>`}</h1>
         <p>${won ? 'Clean hands.' : 'Watch the telegraph — guard the zone it winds up toward.'}</p>
         <div class="cta"><strong>A</strong> rematch · <strong>B</strong> menu</div>`;
       $('overlay').classList.remove('hide');
@@ -384,3 +385,5 @@ window.__senwii = {
   scene, camera, renderer, step, startMatch,
   fps: () => fps,
 };
+
+hydrateIcons();

@@ -5,9 +5,7 @@
  * Everything is measured RELATIVE to a reference captured from the player's
  * own pose, never from assumed Euler angles.
  *
- * Games should drive this through `TraySteer`, which adds the glitch-
- * proofing a bare capture+filter stack lacks: stillness-gated capture,
- * grip-change re-centring, idle re-zero, and output smoothing.
+ * Games drive this through `TraySteer` (capture + anti-drift filter).
  *
  * The capture decides which end of the phone is under the right hand from
  * the screen's lean toward the face: the player's right is 90° clockwise
@@ -92,198 +90,183 @@ export class SteerFilter {
   }
 }
 
-// ── TraySteer: capture + filter + the glue that makes it glitch-free ──────
+// ── Gyro boost: undo the phone's attitude-fusion lag ──────────────────────
+// The bank comes from the OS's fused orientation, which trails the real hand
+// by 20-120ms depending on the phone. The gyro has no such lag: the rotation
+// it recorded over the last (measured) lag window is exactly how far the
+// fused bank is behind, so adding it puts the reading where the hand actually
+// is. Once the hand has been still for one lag window it adds nothing, so it
+// can never leave the steering offset, and an unmeasurable lag means no
+// boost at all.
+export const LAG_CANDIDATES_MS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+// A lag only counts if the gyro, shifted by it, explains the fused motion:
+// residual under this fraction of the motion's own power. A backwards or
+// garbage gyro explains nothing, so it gets no boost at all.
+export const LAG_FIT_MAX = 0.2;
+export const LAG_EVIDENCE_S = 1.2;     // seconds of real rolling before trusting a lag
+export const LEAD_CAP_DEG = 20;        // safety bound on the catch-up a sample can add
+const MOVING_DPS = 12;
+const RATE_TAU_S = 0.04;
 
-// Below this bank rate (°/s) the hand counts as still: a tremor floor, not a
-// motion gate. Measured from the bank signal itself, so it needs no
-// calibration and works on every device.
-export const STILL_RATE_DPS = 7;
-// The phone must hold still this long before its pose is trusted as neutral.
-export const STILL_MS = 400;
-// A persistent change in the play plane's pitch (screen-normal tilt) larger
-// than this means the grip itself changed — phone picked up to read a
-// message, set on its edge, handed to someone else. Transient leans never
-// hold this long; a steep-but-stable wheel grip never leaves its own pitch.
-export const GRIP_CHANGE_DEG = 25;
-// How long the pose may disagree with the captured pitch before the
-// reference is dropped: short enough that steering stops while the phone
-// is elsewhere, long enough that a thrown lean never trips it.
-export const GRIP_CHANGE_MS = 350;
-// The hunt waits this long for stillness before capturing anyway (a moving
-// hand should not mean dead steering forever — best effort beats nothing).
-export const HUNT_GIVE_UP_MS = 2500;
-// Output smoothing: one-pole low-pass on the shaped steer. Small enough to
-// stay out of the way of real steering, big enough to erase packet-to-packet
-// gyro shimmer — the "jittery ship" failure.
-export const SMOOTH_TAU_S = 0.045;
-// …plus a slew cap so a corrupted packet can never teleport the wheel.
-export const SLEW_DPS = 300;
-// Steering authority fades in over this window after a capture, so even a
-// mediocre capture can never yank the vehicle on the frame it lands.
-export const RAMP_S = 0.35;
+/** d(bank)/dt in deg/s from gyro body rates (deg/s), for a capture with sign sy. */
+export function gyroBankRate(axes, bodyRate, sy) {
+  const w = {
+    x: axes.x.x * bodyRate.x + axes.y.x * bodyRate.y + axes.z.x * bodyRate.z,
+    y: axes.x.y * bodyRate.x + axes.y.y * bodyRate.y + axes.z.y * bodyRate.z,
+  };
+  // d(y.z)/dt = (ω_world × y).z; bank = −asin(sy·y.z).
+  const dyz = w.x * axes.y.y - w.y * axes.y.x;
+  return (-sy * dyz) / Math.sqrt(Math.max(1e-4, 1 - axes.y.z * axes.y.z));
+}
 
-/**
- * TraySteer — the whole tilt-steering stack in one object.
- *
- * Why not just captureTray() + SteerFilter() per sample (what Alien Attack
- * did originally): a neutral captured from a single packet is only as good
- * as that packet. Capture while the hand is still coming to rest — pressing
- * A on the results screen does exactly that — and the ship/kart drifts for
- * seconds while the filter slowly heals a bias it was handed at birth. And
- * when the player picks the phone up to look at it and lays it back down,
- * the old neutral is simply wrong from then on.
- *
- * The fixes, each one a failure actually observed in play:
- *
- *   1. Stillness-gated capture. The reference is the AVERAGE of a window in
- *      which the bank reading barely moved — the phone is provably at rest —
- *      so "straight" is a measurement, not a snapshot. A capture mid-swing
- *      is impossible; the hunt waits for stillness.
- *   2. Grip-change re-hunt. A persistent change in the play plane's pitch
- *      (phone picked up, rotated, set down differently) marks the reference
- *      stale; the next still moment re-captures. No more "it drifted after
- *      I checked a message".
- *   3. Idle re-zero. Between rounds the game marks the steer idle, and
- *      whatever pose the phone rests in becomes the neutral for the next
- *      round — the first corner of a new run is as centred as the last.
- *   4. Output smoothing + slew cap. Gyro shimmer stops at the filter; the
- *      vehicle sees a clean signal.
- *   5. Authority ramp. For RAMP_S after every capture the output eases in,
- *      so the worst a capture can do is a soft lean, never a lurch.
- */
-export class TraySteer {
-  constructor({ invert = false, onCapture = null } = {}) {
-    this.invert = invert;
-    this.onCapture = onCapture;          // ({ noise }) — HUD may show it
-    this.filter = new SteerFilter();
-    this.ref = null;                     // locked reference; null = hunting
-    this.prov = null;                    // provisional reference while hunting
-    this.prevRight = null;               // carries the right-hand sign forward
-    this.stillSince = 0;
-    this.huntSince = 0;
-    this.window = [];                    // { bank, t } recent still samples
-    this.pitch0 = 0;                     // play-plane pitch at capture, rad
-    this.gripMovedMs = 0;
-    this.smoothed = 0;
-    this.out = 0;
-    this.authority = 0;
-    this.status = 'hunting';             // hunting | locked
-    this.lastBank = undefined;
-    this.prevRaw = undefined;
-    this.lastAxes = null;
-    this.noise = 0;
-    this.idleMode = false;
-  }
-
-  /** Drop the reference and wait for stillness to capture a fresh one. */
-  recentre() {
-    this.ref = null;
-    this.prov = null;
-    this.stillSince = 0;
-    this.huntSince = 0;
-    this.window.length = 0;
-    this.gripMovedMs = 0;
-    this.lastBank = undefined;
-    this.prevRaw = undefined;
-    this.status = 'hunting';
-  }
-
-  setInvert(v) {
-    this.invert = v;
-  }
-
-  /** One-line summary for the games' debug overlays. */
-  describe() {
-    const raw = this.lastBank === undefined ? '—' : `${this.lastBank.toFixed(1)}°`;
-    return `${this.status} · raw ${raw} · noise ${this.noise.toFixed(1)}°`;
+class LagMeter {
+  constructor() {
+    this.clock = 0;
+    this.hist = [];                    // { t, g } smoothed gyro bank rate
+    this.steps = [];                   // { t, d } raw gyro bank change per sample
+    this.err = LAG_CANDIDATES_MS.map(() => 0);
+    this.evidence = 0;
+    this.sF = 0;                       // smoothed fused bank rate
+    this.sG = 0;                       // smoothed gyro bank rate
+    this.prevBank = undefined;
+    this.prevG = undefined;
+    this.power = 0;                    // Σ sF² over the same window as err
+    this.lagS = 0;
   }
 
   /**
-   * Feed one orientation sample. Returns the shaped steer (−STEER_FULL…
-   * STEER_FULL, degrees, +right, post-smoothing).
+   * How far the fused bank is behind the hand: the rotation the gyro recorded
+   * over the last `lagS` seconds. Exact where "rate × lag" only extrapolates
+   * (and mis-guesses whenever the hand is speeding up or slowing down).
    */
-  update(axes, dt, now) {
-    this.lastAxes = axes;
-
-    if (!this.ref) return this.hunt(axes, dt, now);
-
-    // ── Locked ──
-    const raw = trayRead(axes, this.ref).bank;
-    this.lastBank = raw;
-
-    // Grip-change watch: the play plane's pitch drifting away from the
-    // captured pitch — persistently — marks the reference stale. Dropping
-    // to hunting right away is the point: a phone lifted out of the play
-    // pose must stop steering, not wobble on a dead reference for seconds.
-    const pitch = Math.acos(clamp1(axes.z.z));
-    const moved = Math.abs(pitch - this.pitch0) > GRIP_CHANGE_DEG * DEG;
-    this.gripMovedMs = moved ? this.gripMovedMs + dt * 1000 : 0;
-    if (this.gripMovedMs > GRIP_CHANGE_MS) this.recentre();
-
-    const shaped = this.filter.update(raw, dt);
-    return this.emit(shaped, dt);
+  catchUp() {
+    if (!(this.lagS > 0)) return 0;
+    const from = this.clock - this.lagS;
+    let sum = 0;
+    for (let i = this.steps.length - 1; i >= 0; i -= 1) {
+      const s = this.steps[i];
+      const prevT = i > 0 ? this.steps[i - 1].t : s.t - 1e-9;
+      if (prevT >= from) sum += s.d;
+      else { sum += s.d * Math.max(0, (s.t - from) / (s.t - prevT)); break; }
+    }
+    return sum;
   }
 
-  /** Hunt: wait for stillness, then lock a reference in. */
-  hunt(axes, dt, now) {
-    if (!this.prov) {
-      this.prov = captureTray(axes, this.prevRight);
-      if (!this.huntSince) this.huntSince = now;
-    }
-    const raw = trayRead(axes, this.prov).bank;
-    this.lastBank = raw;
-
-    const rate = this.prevRaw === undefined || dt <= 0
-      ? Infinity : Math.abs(raw - this.prevRaw) / dt;
-    this.prevRaw = raw;
-
-    if (rate < STILL_RATE_DPS) {
-      if (!this.stillSince) this.stillSince = now;
-      this.window.push({ bank: raw, t: now });
-      // Keep roughly STILL_MS + a little of history; more is dead weight.
-      while (this.window.length > 2 && now - this.window[0].t > STILL_MS + 300) {
-        this.window.shift();
+  gyroAt(t) {
+    // Linear interpolation between the samples around t: picking the nearest
+    // older sample quantised every candidate to the packet grid, so 20ms and
+    // 30ms read the same 33ms-old sample and the lag came out short.
+    const h = this.hist;
+    for (let i = h.length - 1; i >= 0; i -= 1) {
+      if (h[i].t <= t) {
+        const next = h[i + 1];
+        if (!next) return h[i].g;
+        const u = (t - h[i].t) / (next.t - h[i].t);
+        return h[i].g + (next.g - h[i].g) * u;
       }
-      const held = now - this.stillSince >= STILL_MS;
-      if (held || now - this.huntSince > HUNT_GIVE_UP_MS) this.capture(now);
-    } else {
-      // Motion resets the window but NOT the give-up clock: a hand that
-      // never quite stops still gets a best-effort capture.
-      this.stillSince = 0;
-      this.window.length = 0;
     }
-    return this.emit(0, dt);             // no steering until we have a neutral
+    return undefined;
   }
 
-  /** Average the still window into the reference and lock it. */
-  capture(now) {
-    const avg = this.window.length
-      ? this.window.reduce((a, s) => a + s.bank, 0) / this.window.length
-      : 0;
-    // Keep the provisional reference's frozen signs — they held through the
-    // whole still window — and re-zero it to the window's average pose.
-    this.ref = {
-      right: this.prov.right,
-      sy: this.prov.sy,
-      bank0: this.prov.bank0 + avg,
-    };
-    this.prevRight = this.prov.right;
-    this.pitch0 = Math.acos(clamp1(this.lastAxes.z.z));
-    // Capture noise: how much the "still" window actually moved. Large
-    // noise means the capture is suspect — the authority ramp covers it.
-    this.noise = this.window.length > 1
-      ? Math.max(...this.window.map((s) => Math.abs(s.bank - avg)))
-      : 0;
-    this.window.length = 0;
-    this.stillSince = 0;
-    this.huntSince = 0;
-    this.gripMovedMs = 0;
-    this.prov = null;
-    this.prevRaw = undefined;
-    this.filter = new SteerFilter();     // fresh filter; the neutral is exact
+  update(fusedBank, gyroRate, dt) {
+    if (!(dt > 0)) return this.lagS;
+    this.clock += dt;
+    const k = 1 - Math.exp(-dt / RATE_TAU_S);
+    if (this.prevBank !== undefined) this.sF += ((fusedBank - this.prevBank) / dt - this.sF) * k;
+    this.prevBank = fusedBank;
+    // The fused rate is a backward difference over this interval, i.e. the
+    // mean rate across it; give the gyro the same mean (trapezoid) so the
+    // two are in phase and a lag-free phone measures exactly 0.
+    const gMean = this.prevG === undefined ? gyroRate : 0.5 * (gyroRate + this.prevG);
+    this.prevG = gyroRate;
+    this.sG += (gMean - this.sG) * k;
+    this.hist.push({ t: this.clock, g: this.sG });
+    while (this.hist.length > 2 && this.clock - this.hist[0].t > 0.2) this.hist.shift();
+    this.steps.push({ t: this.clock, d: gMean * dt });
+    while (this.steps.length > 2 && this.clock - this.steps[0].t > 0.2) this.steps.shift();
+
+    // Score candidates only once both rate signals have settled (a few
+    // smoothing time constants) and the history covers EVERY candidate:
+    // otherwise short lags absorb the start-up transient that long lags
+    // skip, and the comparison is rigged.
+    const maxLagS = LAG_CANDIDATES_MS[LAG_CANDIDATES_MS.length - 1] / 1000;
+    const warmed = this.clock > 5 * RATE_TAU_S && this.clock - this.hist[0].t >= maxLagS;
+    if (warmed && (Math.abs(this.sG) > MOVING_DPS || Math.abs(this.sF) > MOVING_DPS)) {
+      const decay = Math.exp(-dt / 20);
+      LAG_CANDIDATES_MS.forEach((ms, i) => {
+        const g = this.gyroAt(this.clock - ms / 1000);
+        if (g === undefined) return;
+        this.err[i] = this.err[i] * decay + (this.sF - g) ** 2 * dt;
+      });
+      this.power = this.power * decay + this.sF ** 2 * dt;
+      this.evidence += dt;
+      if (this.evidence >= LAG_EVIDENCE_S) {
+        let best = 0;
+        for (let i = 1; i < this.err.length; i += 1) if (this.err[i] < this.err[best]) best = i;
+        // Hysteresis: keep the current lag unless another fits clearly better,
+        // so neighbouring candidates with near-equal fits can't flicker.
+        const cur = LAG_CANDIDATES_MS.indexOf(Math.round(this.lagS * 1000));
+        if (cur >= 0 && this.lagS > 0 && this.err[cur] <= this.err[best] * 1.15) best = cur;
+        this.lagS = this.err[best] < LAG_FIT_MAX * this.power ? LAG_CANDIDATES_MS[best] / 1000 : 0;
+      }
+    }
+    return this.lagS;
+  }
+}
+
+// ── TraySteer: capture + filter, nothing else ─────────────────────────────
+
+/**
+ * TraySteer — the tilt-steering stack games drive: exactly the pipeline
+ * Alien Attack shipped with and was play-proven on. The neutral is captured
+ * from the pose at (re)start, optionally after a grace period while the
+ * hand settles; SteerFilter then heals any small standing bias.
+ *
+ * Deliberately NOT here (a previous build added these and they broke play):
+ *   - grip-change re-centring: in the flat tray grip, banking the phone IS
+ *     tilting the screen normal, so every hard turn read as a "grip change",
+ *     dropped the neutral mid-corner and re-locked on the banked pose;
+ *   - stillness-gated capture: sensor shimmer alone exceeds any usable
+ *     stillness threshold, so the capture hunted for seconds of dead steer;
+ *   - output smoothing / authority ramps: latency the player feels as mush.
+ * The player re-centres with the phone's recentre button when they want.
+ *
+ * Gyro boost: pass the pointer's learned gyro (channel.pointer.bodyRate) as
+ * update()'s 4th argument and the fused attitude's lag is measured per phone
+ * and cancelled (see LagMeter). Unlike the smoothing above, this REMOVES
+ * latency, and it switches itself off when the gyro can't be trusted.
+ */
+export class TraySteer {
+  constructor({ invert = false, boost = true } = {}) {
+    this.invert = invert;
+    this.filter = new SteerFilter();
+    this.ref = null;                     // captured neutral; null = capture next sample
+    this.prevRight = null;               // keeps the right-hand side stable across recentres
+    this.notBefore = 0;                  // capture grace (hand still coming to rest)
+    this.idleMode = false;
+    this.lastBank = undefined;
+    this.out = 0;
+    this.boost = boost;                  // gyro lag compensation (see LagMeter)
+    this.lag = new LagMeter();           // per-phone, survives recentres
+    this.lead = 0;
+  }
+
+  get status() { return this.ref ? 'locked' : 'hunting'; }
+
+  /** Take the next sample (at or after `notBefore`, ms) as "straight". */
+  recentre(notBefore = 0) {
+    this.ref = null;
+    this.notBefore = notBefore;
+    this.filter = new SteerFilter();
     this.filter.idle = this.idleMode;
-    this.status = 'locked';
-    if (this.onCapture) this.onCapture({ noise: this.noise, at: now });
+  }
+
+  setInvert(v) { this.invert = v; }
+
+  describe() {
+    const raw = this.lastBank === undefined ? '—' : `${this.lastBank.toFixed(1)}°`;
+    const lag = this.lag.evidence >= LAG_EVIDENCE_S ? `${Math.round(this.lag.lagS * 1000)}ms` : '—';
+    return `${this.status} · raw ${raw} · lag ${lag} · lead ${this.lead.toFixed(1)}°`;
   }
 
   /** Games mark the steer idle between rounds: resting pose = new neutral. */
@@ -292,19 +275,34 @@ export class TraySteer {
     this.filter.idle = v;
   }
 
-  /** Smoothing + slew cap + invert + authority ramp on the way out. */
-  emit(shaped, dt) {
-    const target = this.invert ? -shaped : shaped;
-    // Authority fades in after a capture (and out while hunting); it never
-    // ramps down mid-play.
-    this.authority = Math.max(0, Math.min(1,
-      this.authority + (this.status === 'locked' ? dt / RAMP_S : -dt / RAMP_S)));
-    const goal = target * this.authority;
-    const k = 1 - Math.exp(-dt / SMOOTH_TAU_S);
-    this.smoothed += (goal - this.smoothed) * k;
-    const maxStep = SLEW_DPS * dt;
-    const step = Math.max(-maxStep, Math.min(maxStep, this.smoothed - this.out));
-    this.out += step;
+  get idle() { return this.idleMode; }
+
+  /**
+   * Feed one sample; returns steer in degrees (+right, ±STEER_FULL at full
+   * lock). `bodyRate` is the pointer's learned gyro (channel.pointer.bodyRate,
+   * deg/s, body frame) or null; with it the reading is lag-compensated.
+   */
+  update(axes, dt, now, bodyRate = null) {
+    if (!this.ref) {
+      if (now < this.notBefore) return (this.out = 0);
+      this.ref = captureTray(axes, this.prevRight);
+      this.prevRight = this.ref.right;
+    }
+    let raw = trayRead(axes, this.ref).bank;
+    if (!Number.isFinite(raw)) return this.out;       // corrupt packet: hold
+    this.lastBank = raw;
+    if (bodyRate && this.boost) {
+      const g = gyroBankRate(axes, bodyRate, this.ref.sy);
+      if (Number.isFinite(g)) {
+        this.lag.update(raw, g, dt);
+        this.lead = Math.max(-LEAD_CAP_DEG, Math.min(LEAD_CAP_DEG, this.lag.catchUp())) + 0;  // no -0
+        raw += this.lead;
+      }
+    } else {
+      this.lead = 0;
+    }
+    const shaped = this.filter.update(raw, dt);
+    this.out = this.invert ? -shaped : shaped;
     if (Object.is(this.out, -0)) this.out = 0;
     return this.out;
   }

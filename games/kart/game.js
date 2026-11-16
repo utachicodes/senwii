@@ -9,6 +9,7 @@ import {
   Race, trackCenter, trackTangent, fmtMs,
   RACE_LAPS, TRACK_HALF_WIDTH, SAMPLES,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Kart time trial — renderer. Tilt the phone like a wheel to steer; throttle
@@ -198,8 +199,8 @@ function handleEvent(e) {
     syncHud();
   } else if (e.type === 'done') {
     const rows = race.lapTimes.map((ms, i) =>
-      `<div>Lap ${i + 1} &nbsp; <strong>${fmtMs(ms)}</strong>${ms === race.bestLapMs ? ' ★' : ''}</div>`).join('');
-    $('panel').innerHTML = `<h1>🏁 <em>Finish!</em></h1>
+      `<div>Lap ${i + 1} &nbsp; <strong>${fmtMs(ms)}</strong>${ms === race.bestLapMs ? ` ${icon('star', 'fill')}` : ''}</div>`).join('');
+    $('panel').innerHTML = `<h1>${icon('flag')} <em>Finish!</em></h1>
       <p>Total ${fmtMs(e.totalMs)} — best lap ${fmtMs(e.bestMs)}.</p>
       <div class="laps">${rows}</div>
       <div class="cta"><strong>A</strong> race the ghost · <strong>B</strong> menu</div>`;
@@ -292,3 +293,5 @@ window.__senwii = {
   race, channel, pointer: channel.pointer, scene, camera, renderer, step,
   startRace, kart, ghostKart, fps: () => fps,
 };
+
+hydrateIcons();

@@ -7,6 +7,7 @@ import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { axesFromSample, clamp } from '../../core/orientation.js';
 import { Duel, AI, swordBasis, bladeScreenAngle } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Swordplay — renderer. The duel runs in logic.js; this file draws it and
@@ -177,7 +178,7 @@ function handleEvent(e) {
       break;
     case 'over': {
       const won = e.winner === 'player';
-      $('panel').innerHTML = `<h1>${won ? '🏆 <em>You win!</em>' : '💀 <em>Defeated</em>'}</h1>
+      $('panel').innerHTML = `<h1>${won ? `${icon('trophy')} <em>You win!</em>` : `${icon('skull')} <em>Defeated</em>`}</h1>
         <p>${won ? 'Clean swordwork.' : 'Watch the red ring — turn your blade across the strike.'}</p>
         <div class="cta"><strong>A</strong> rematch · <strong>B</strong> menu</div>`;
       $('overlay').classList.remove('hide');
@@ -292,3 +293,5 @@ window.__senwii = {
   scene, camera, renderer, step, sword, startMatch,
   fps: () => fps,
 };
+
+hydrateIcons();

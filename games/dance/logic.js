@@ -13,38 +13,38 @@
  */
 
 export const MOVES = {
-  BODY_LEFT:  { id: 'body-left',  label: 'Step Left',   icon: '⬅️', group: 'body' },
-  BODY_RIGHT: { id: 'body-right', label: 'Step Right',  icon: '➡️', group: 'body' },
-  BODY_UP:    { id: 'body-up',    label: 'Arms Up',     icon: '🙌', group: 'body' },
-  FACE:       { id: 'face',       label: 'Face Move',   icon: '😄', group: 'face' },
-  PHONE_SHAKE:{ id: 'phone-shake',label: 'Shake Phone', icon: '📳', group: 'phone' },
-  PHONE_SWING:{ id: 'phone-swing',label: 'Swing Phone', icon: '📱', group: 'phone' },
-  PHONE_RAISE:{ id: 'phone-raise',label: 'Raise Phone', icon: '☝️', group: 'phone' },
+  BODY_LEFT:  { id: 'body-left',  label: 'Step Left',   icon: 'arrow-left', group: 'body' },
+  BODY_RIGHT: { id: 'body-right', label: 'Step Right',  icon: 'arrow-right', group: 'body' },
+  BODY_UP:    { id: 'body-up',    label: 'Arms Up',     icon: 'arms-up', group: 'body' },
+  FACE:       { id: 'face',       label: 'Face Move',   icon: 'smile', group: 'face' },
+  PHONE_SHAKE:{ id: 'phone-shake',label: 'Shake Phone', icon: 'vibrate', group: 'phone' },
+  PHONE_SWING:{ id: 'phone-swing',label: 'Swing Phone', icon: 'swing', group: 'phone' },
+  PHONE_RAISE:{ id: 'phone-raise',label: 'Raise Phone', icon: 'phone-up', group: 'phone' },
 };
 
 const M = MOVES;
 
 export const SONGS = [
   {
-    id: 'warmup', name: 'Warm Up', emoji: '🌤️', bpm: 92, bars: 16, order: 0,
+    id: 'warmup', name: 'Warm Up', icon: 'sun', bpm: 92, bars: 16, order: 0,
     moves: [M.BODY_LEFT, M.BODY_RIGHT, M.PHONE_SHAKE],
     density: 0.55, doubleEvery: 0,
     desc: 'Easy groove — learn the steps.',
   },
   {
-    id: 'sunny', name: 'Sunny Strut', emoji: '🌈', bpm: 108, bars: 20, order: 1,
+    id: 'sunny', name: 'Sunny Strut', icon: 'rainbow', bpm: 108, bars: 20, order: 1,
     moves: [M.BODY_LEFT, M.BODY_RIGHT, M.BODY_UP, M.PHONE_SHAKE, M.PHONE_SWING],
     density: 0.7, doubleEvery: 8,
     desc: 'Pick up the pace, add arms and swings.',
   },
   {
-    id: 'neon', name: 'Neon Pop', emoji: '🌃', bpm: 124, bars: 24, order: 2,
+    id: 'neon', name: 'Neon Pop', icon: 'city', bpm: 124, bars: 24, order: 2,
     moves: [M.BODY_LEFT, M.BODY_RIGHT, M.BODY_UP, M.FACE, M.PHONE_SHAKE, M.PHONE_SWING],
     density: 0.8, doubleEvery: 4,
     desc: 'Face the camera — smile or move your head!',
   },
   {
-    id: 'finale', name: 'Finale', emoji: '🔥', bpm: 138, bars: 28, order: 3,
+    id: 'finale', name: 'Finale', icon: 'flame', bpm: 138, bars: 28, order: 3,
     moves: [M.BODY_LEFT, M.BODY_RIGHT, M.BODY_UP, M.FACE, M.PHONE_SHAKE, M.PHONE_SWING, M.PHONE_RAISE],
     density: 0.9, doubleEvery: 4,
     desc: 'Everything at once. Bring it home.',
@@ -225,9 +225,12 @@ const SAVE_KEY = 'senwii.dance.v1';
 export function loadDanceSave() {
   try {
     const raw = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+    const n = Number(raw && raw.unlocked);
+    const best = raw && raw.best && typeof raw.best === 'object' && !Array.isArray(raw.best) ? raw.best : {};
     return {
-      unlocked: Math.max(1, raw.unlocked || 1),
-      best: raw.best || {},       // songId -> { score, grade }
+      // Corrupt values (strings, NaN, out of range) must never lock every song.
+      unlocked: Number.isFinite(n) ? Math.min(SONGS.length, Math.max(1, Math.floor(n))) : 1,
+      best,                       // songId -> { score, grade }
     };
   } catch {
     return { unlocked: 1, best: {} };

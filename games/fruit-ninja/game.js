@@ -9,6 +9,7 @@ import { saveSensitivity, loadSensitivity } from '../../core/calibration.js';
 import { AudioEngine } from '../../core/audio.js';
 import { GameLink } from '../../core/net.js';
 import { clamp } from '../../core/orientation.js';
+import { hydrateIcons } from '../../core/icons.js';
 
 /**
  * Fruit Ninja — Three.js renderer, styled after the original: a wooden dojo
@@ -1248,3 +1249,5 @@ window.__senwii = {
   syncScene, drawTrail, pruneMeshes,
   fps: () => fps,
 };
+
+hydrateIcons();

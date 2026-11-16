@@ -1,7 +1,7 @@
 {
   "title": "Bowling",
   "tagline": "Point down the lane. Swing to release. Ten frames, standard scoring.",
-  "emoji": "🎳",
+  "icon": "pin",
   "players": 1,
   "order": 4
 }

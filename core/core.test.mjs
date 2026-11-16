@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bodyAxes, bodyAxesFromQuat, DEG } from './orientation.js';
+import { bodyAxes, bodyAxesFromQuat, axesFromSample, DEG } from './orientation.js';
+import { TraySteer } from './tilt.js';
 import { Pointer } from './pointer.js';
 
 /**
@@ -69,6 +70,15 @@ const LANDSCAPE = quatFromEuler(0, 0, 90);
 function drive({
   yaw = () => 0, pitch = () => 0, grip = FLAT, device = DEVICE.spec,
   lagMs = 60, secs = 6, pointer = null, packetDelayMs = 25,
+  // Wi-Fi model: each packet gets up to `jitterMs` of extra random delay but
+  // TCP keeps them in order, so a late one holds back everything behind it
+  // and they land in bunches. dt is then measured from arrivals, exactly as
+  // core/channel.js does.
+  jitterMs = 0,
+  // Send the phone-side gyro integrals (public/controller.js) with each packet.
+  integrals = false,
+  // Stamp each packet with the phone's send time, as the controller does.
+  phoneClock = true,
 }) {
   const p = pointer || new Pointer({ degPerScreen: 30 });
   const attitude = (t) => mul(mul(axisQ(2, yaw(t)), axisQ(0, pitch(t))), grip);
@@ -76,6 +86,12 @@ function drive({
   const h = 1e-4;
   const track = [];
   const queue = [];   // packets in flight: sensor → network → game
+  let seed = 12345;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  let lastAt = 0;
+  let prevArrival = 0;
+  const acc = { x: 0, y: 0, z: 0, t: 0 };
+  let prevR = null;
   let ms = 0;
   for (let i = 0; i < secs * 60; i += 1, ms += FRAME) {
     const t = ms / 1000;
@@ -86,10 +102,34 @@ function drive({
     );
     const r = device ? device(w) : null;
     const sample = { quat: attitude(Math.max(0, ms - lagMs) / 1000) };
-    if (r) sample.motion = { rx: r[0], ry: r[1], rz: r[2] };
+    if (phoneClock) sample.t = ms;
+    if (r) {
+      sample.motion = { rx: r[0], ry: r[1], rz: r[2] };
+      if (integrals) {
+        if (prevR) {
+          const dS = FRAME / 1000;
+          acc.x += 0.5 * (prevR[0] + r[0]) * dS;
+          acc.y += 0.5 * (prevR[1] + r[1]) * dS;
+          acc.z += 0.5 * (prevR[2] + r[2]) * dS;
+          acc.t += dS;
+        }
+        prevR = r;
+        Object.assign(sample.motion, { ix: acc.x, iy: acc.y, iz: acc.z, it: acc.t });
+      }
+    }
     // Real packets take time to reach the game: emit now, deliver later.
-    queue.push({ at: ms + packetDelayMs, sample });
-    while (queue.length && queue[0].at <= ms) p.update(queue.shift().sample, FRAME / 1000, ms);
+    const at = Math.max(lastAt, ms + packetDelayMs + jitterMs * rand());
+    lastAt = at;
+    queue.push({ at, sample });
+    while (queue.length && queue[0].at <= ms) {
+      const pkt = queue.shift();
+      let dt = FRAME / 1000;
+      if (jitterMs) {
+        dt = prevArrival ? Math.min(Math.max((ms - prevArrival) / 1000, 1 / 240), 0.1) : 1 / 60;
+        prevArrival = ms;
+      }
+      p.update(pkt.sample, dt, ms);
+    }
     const d = p.sampleAt(ms);
     track.push({ ms, x: d.x, y: d.y, yaw: yaw(t), pitch: pitch(t) });
   }
@@ -371,7 +411,9 @@ test('drift from a huge clamped swing heals while the hand is still', () => {
 });
 
 test('a held aim is never dragged — healing targets the pose, not the centre', () => {
-  const p = new Pointer({ degPerScreen: 30 });
+  // Asserts the linear pose mapping, so precision mode (which deliberately
+  // moves slow motion less) is off; its own no-creep test is below.
+  const p = new Pointer({ degPerScreen: 30, precision: false });
   drive({ ...WANDER, secs: 4, pointer: p });
   p.recentre();
   // Raise the aim 4° and hold it there, dead still, for seven seconds.
@@ -548,4 +590,170 @@ test('network latency lead: tighter tracking over a slow link, unchanged on LAN'
 test('the default pointer speed is the rebased 20°-per-screen (old 150%)', () => {
   assert.equal(new Pointer({}).degPerScreen, 20);
   assert.equal(new Pointer({}).sensitivity, 1);
+});
+
+// ── Wi-Fi jitter: the phone's own clock keeps aim exact ─────────────────────
+// Learn (0-5s), hold still (5-6.5s), aim hard (6.5-12.5s), then stop dead.
+// The error that matters is how far the cursor sits from where it should be
+// the moment the hand stops — before any healing can hide it. "Where it
+// should be" is the pointer's own fully healed rest position 7s later.
+const AIM = (u) => 4.5 * Math.sin(2 * Math.PI * 1.1 * u) + 3 * Math.sin(2 * Math.PI * 0.37 * u)
+  + 2 * Math.sin(2 * Math.PI * 2.3 * u);
+const STOP_DRILL = {
+  yaw: (t) => (t < 5 ? 5 * Math.sin(2 * Math.PI * t) : 5 * Math.sin(2 * Math.PI * 5)
+    + (t < 6.5 ? 0 : AIM(Math.min(t, 12.5) - 6.5))),
+  pitch: (t) => (t < 5 ? 5 * Math.sin(2 * Math.PI * 1.4 * t) : 5 * Math.sin(2 * Math.PI * 1.4 * 5)
+    + (t < 6.5 ? 0 : 4 * Math.sin(2 * Math.PI * 1.7 * (Math.min(t, 12.5) - 6.5)))),
+  secs: 20,
+};
+function stopError(opts) {
+  const { p, track } = drive({ ...STOP_DRILL, ...opts });
+  const off = (r) => r.x - (0.5 - r.yaw / DEG_PER_SCREEN);
+  const atStop = track.find((r) => r.ms >= 12850);
+  const healed = track.find((r) => r.ms >= 19900);
+  return { p, err: Math.abs(off(atStop) - off(healed)) };
+}
+
+test('Wi-Fi jitter cannot move the cursor off the hand (phone clock)', () => {
+  const calm = stopError({});
+  assert.ok(calm.p.gyroTrusted);
+  assert.ok(calm.err < 0.01, `on a clean link the cursor stops within 1% (${(calm.err * 100).toFixed(2)}%)`);
+  for (const jitterMs of [40, 70, 120]) {
+    for (const integrals of [false, true]) {
+      const { p, err } = stopError({ jitterMs, integrals });
+      assert.ok(p.gyroTrusted, `trusted under ${jitterMs}ms jitter`);
+      assert.ok(Math.abs(err - calm.err) < 0.002,
+        `${jitterMs}ms jitter${integrals ? ' + integrals' : ''}: same as a clean link (${(err * 100).toFixed(2)}% vs ${(calm.err * 100).toFixed(2)}%)`);
+    }
+  }
+});
+
+test('regression: timing by packet ARRIVAL let Wi-Fi jitter push the cursor off', () => {
+  // Pins why the phone clock matters: without it the same drill drifts.
+  const calm = stopError({ phoneClock: false });
+  const worst = Math.max(...[40, 70].map((jitterMs) => stopError({ jitterMs, phoneClock: false }).err));
+  assert.ok(worst > calm.err + 0.01, `arrival timing drifts under jitter (${(worst * 100).toFixed(2)}%)`);
+});
+
+test('phone-side integrals recover gyro motion the send-rate cap skipped', () => {
+  // The gyro fires at 120Hz but only every other reading is sent, and the
+  // reading that IS sent was taken while the hand had slowed down. Without
+  // integrals the game sees only that last rate; with them it gets the full
+  // rotation, skipped readings included.
+  const p = new Pointer({ degPerScreen: 30 });
+  drive({ ...WANDER, secs: 5, pointer: p, integrals: true });
+  assert.ok(p.gyroTrusted);
+  const yawAxis = p.map[2] || p.map[1];
+  const send = (rateSent, rotated, dtS) => {
+    const r = [0, 0, 0];
+    r[yawAxis.col] = rateSent * yawAxis.sign;
+    const ints = { ...p.prevInt };
+    ints[['x', 'y', 'z'][yawAxis.col]] += rotated * yawAxis.sign;
+    const t = p.prevPhoneT + dtS * 1000;
+    p.update({
+      quat: FLAT, t,
+      motion: { rx: r[0], ry: r[1], rz: r[2], ix: ints.x, iy: ints.y, iz: ints.z, it: ints.t + dtS },
+    }, dtS, t);
+  };
+  const before = p.yawOffDeg;
+  // 10 packets, each covering two 1/120s readings: 150°/s then 50°/s.
+  // True rotation per packet = (150 + 50) / 120 = 1.667° (in reported units
+  // before the learned scale); the sent rate alone would claim 50/60 = 0.83°.
+  for (let k = 0; k < 10; k += 1) send(50, (150 + 50) / 120, 1 / 60);
+  const moved = Math.abs(p.yawOffDeg - before) / Math.abs(yawAxis.scale);
+  assert.ok(Math.abs(moved - 16.67) < 1.5, `full rotation committed: ${moved.toFixed(2)} of 16.67`);
+});
+
+// ── Precision mode ──────────────────────────────────────────────────────────
+
+test('precision: slow careful motion moves the cursor less, fast moves are untouched', () => {
+  const travelFor = (precision, degPerSec) => {
+    const p = new Pointer({ degPerScreen: 30, precision });
+    drive({ ...WANDER, secs: 5, pointer: p, integrals: true });
+    p.recentre();
+    const secs = 3 / degPerSec;                     // a 3° move at this speed
+    const yaw = (t) => (t < 0.3 ? 0 : t < 0.3 + secs ? -degPerSec * (t - 0.3) : -3);
+    const { track } = drive({ yaw, secs: 0.3 + secs + 0.25, pointer: p, integrals: true });
+    return track[track.length - 1].x - 0.5;
+  };
+  const slowOn = travelFor(true, 2);
+  const slowOff = travelFor(false, 2);
+  const fastOn = travelFor(true, 120);
+  const fastOff = travelFor(false, 120);
+  assert.ok(slowOff > 0.08, `sanity: a 3° move travels ~10% (${slowOff.toFixed(3)})`);
+  assert.ok(slowOn < slowOff * 0.65, `slow aim is finer (${slowOn.toFixed(3)} vs ${slowOff.toFixed(3)})`);
+  assert.ok(Math.abs(fastOn - fastOff) < 0.01, `fast moves unchanged (${fastOn.toFixed(3)} vs ${fastOff.toFixed(3)})`);
+});
+
+test('precision: a precise adjustment stays put — healing never undoes it', () => {
+  const p = new Pointer({ degPerScreen: 30 });
+  drive({ ...WANDER, secs: 5, pointer: p, integrals: true });
+  p.recentre();
+  // Creep the aim 2° over 1s, then hold dead still for 6s.
+  const pitch = (t) => (t < 0.3 ? 0 : t < 1.3 ? 2 * (t - 0.3) : 2);
+  const { track } = drive({ pitch, secs: 7.5, pointer: p, integrals: true });
+  const after = track.find((r) => r.ms >= 1600);
+  const done = track[track.length - 1];
+  assert.ok(Math.abs(after.y - 0.5) > 0.02, `sanity: it moved (${after.y.toFixed(3)})`);
+  assert.ok(Math.abs(done.y - after.y) < 0.004, `no creep: ${after.y.toFixed(3)} → ${done.y.toFixed(3)}`);
+});
+
+test('precision: hand tremor shimmer is reduced', () => {
+  // One continuous run: learn on the wander (which ends at rest at 5s), then
+  // hold the aim with 10Hz physiological tremor of 0.06°.
+  const tremor = (t) => 0.06 * Math.sin(2 * Math.PI * 10 * t);
+  const shimmer = (precision) => {
+    const { track } = drive({
+      yaw: (t) => (t < 5 ? WANDER.yaw(t) : tremor(t)),
+      pitch: (t) => (t < 5 ? WANDER.pitch(t) : tremor(t)),
+      secs: 12,
+      pointer: new Pointer({ degPerScreen: 30, precision }),
+      integrals: true,
+    });
+    // Shimmer = frame-to-frame jitter (slow settling is not shimmer).
+    const xs = track.filter((r) => r.ms >= 9000).map((r) => r.x);
+    let sum = 0;
+    for (let i = 1; i < xs.length; i += 1) sum += Math.abs(xs[i] - xs[i - 1]);
+    return sum / (xs.length - 1);
+  };
+  const on = shimmer(true);
+  const off = shimmer(false);
+  assert.ok(off > 0.0002, `sanity: tremor is visible without precision (${(off * 1000).toFixed(3)}‰/frame)`);
+  assert.ok(on <= off * 0.7, `tremor shimmer cut (${(on * 1000).toFixed(3)} vs ${(off * 1000).toFixed(3)} ‰ of screen per frame)`);
+});
+
+// ── Tilt games: the pointer's learned gyro powers the steering boost ───────
+
+test('tray steering: the gyro learned from rolling alone cancels fusion lag (swapped-axis phone)', () => {
+  // Tray grip: flat, long axis across, screen leaned 8° toward the face;
+  // steering rolls it about the player's forward (world north) axis.
+  const grip = mul(axisQ(0, -8), axisQ(2, 90));
+  const roll = (t) => 20 * Math.sin(2 * Math.PI * 0.7 * t) + 7 * Math.sin(2 * Math.PI * 1.9 * t);
+  const att = (t) => mul(axisQ(1, roll(Math.max(0, t))), grip);
+  const run = (boost) => {
+    const p = new Pointer({ degPerScreen: 30 });
+    const steer = new TraySteer({ boost });
+    const ideal = new TraySteer({ boost: false });
+    const FRAME = 1000 / 60;
+    let err = 0;
+    let n = 0;
+    for (let i = 0; i < 14 * 60; i += 1) {
+      const ms = i * FRAME;
+      const t = ms / 1000;
+      const h = 1e-4;
+      const w = omegaBody(bodyAxesFromQuat(att(t)), bodyAxesFromQuat(att(t + h)), h);
+      const r = DEVICE.swapped(w);
+      const sample = { quat: att(t - 0.06), t: ms, motion: { rx: r[0], ry: r[1], rz: r[2] } };
+      p.update(sample, FRAME / 1000, ms);
+      const out = steer.update(axesFromSample(sample), FRAME / 1000, ms, p.bodyRate);
+      const want = ideal.update(axesFromSample({ quat: att(t) }), FRAME / 1000, ms);
+      if (t > 8) { err += Math.abs(out - want); n += 1; }
+    }
+    return { err: err / n, p, steer };
+  };
+  const off = run(false);
+  const on = run(true);
+  assert.ok(on.p.bodyRate, 'the map proved itself on roll-only motion');
+  assert.ok(Math.abs(on.steer.lag.lagS - 0.06) <= 0.02, `measured ${on.steer.lag.lagS * 1000}ms of a 60ms lag`);
+  assert.ok(on.err < off.err * 0.3, `steer error ${on.err.toFixed(2)}° vs ${off.err.toFixed(2)}° without the gyro`);
 });

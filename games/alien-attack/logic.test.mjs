@@ -6,6 +6,11 @@ import {
   LANE_HALF, LATERAL_SPEED, STEER_FULL, SHIP_R, ALIEN_R,
   FIRE_COOLDOWN_MS, LIVES, INVULN_MS, KILL_POINTS,
   SPAWN_MS_START, SPAWN_MS_MIN, ALIEN_BOLT_SPEED,
+  LEVELS, levelDef, SAUCER_TYPES, INTERMISSION_MS, BOSS_DELAY_MS, BOSS_HOLD,
+  DIVER_LOCK_RANGE, DIVER_WINDUP_MS, ZIG_AMP, CLEAR_POINTS, FLAWLESS_POINTS,
+  BOSS_POINTS, TANK_BONUS, SHIP_SPEED, SHIP_SPEED_MAX,
+  PROGRESS_KEY, loadProgress, saveProgress, unlockLevel, recordScore, stepLevel,
+  defaultProgress, tri,
 } from './logic.js';
 
 // ── Tray-grip steering, same proofs the cow carried ────────────────────────
@@ -281,4 +286,333 @@ test('A restarts a finished run from zero', () => {
 test('fmtMs renders minutes and tenths', () => {
   assert.equal(fmtMs(83_400), '1:23.4');
   assert.equal(fmtMs(0), '—:—');
+});
+
+// ── Sectors ────────────────────────────────────────────────────────────────
+
+const nonBoss = LEVELS.filter((d) => !d.boss);
+const bosses = LEVELS.filter((d) => d.boss);
+
+test('levels: ten sane sectors, two bosses, the last one a boss', () => {
+  assert.ok(LEVELS.length >= 8 && LEVELS.length <= 10);
+  assert.ok(LEVELS[LEVELS.length - 1].boss, 'the final sector is a boss');
+  assert.ok(bosses.length >= 2);
+  for (const [i, d] of LEVELS.entries()) {
+    assert.ok(d.name && d.goal >= 1, `sector ${i + 1} has a name and goal`);
+    assert.ok(d.spawnMs >= SPAWN_MS_MIN && d.spawnMs <= 3000);
+    assert.ok(d.alienSpeed[0] > 0 && d.alienSpeed[1] > d.alienSpeed[0]);
+    const types = Object.keys(d.mix);
+    assert.ok(types.length > 0 && types.every((t) => SAUCER_TYPES[t]), 'known saucer types');
+    if (d.intro) assert.ok(d.mix[d.intro] > 0, `sector ${i + 1} actually fields its debut`);
+  }
+  assert.equal(LEVELS[0].speed, SHIP_SPEED);
+  assert.equal(LEVELS[LEVELS.length - 1].speed, SHIP_SPEED_MAX);
+  assert.equal(LEVELS[0].spawnMs, SPAWN_MS_START);
+  assert.deepEqual(Object.keys(LEVELS[0].mix), ['scout'], 'sector 1 is plain scouts');
+  assert.equal(levelDef(0), LEVELS[0]);
+  assert.equal(levelDef(99), LEVELS[LEVELS.length - 1]);
+});
+
+test('levels: difficulty is monotonic', () => {
+  for (let i = 1; i < LEVELS.length; i += 1) {
+    const a = LEVELS[i - 1];
+    const b = LEVELS[i];
+    assert.ok(b.speed >= a.speed, `speed rises into sector ${i + 1}`);
+    assert.ok(b.fireMs <= a.fireMs, `fire discipline tightens into ${i + 1}`);
+    assert.ok(b.boltSpeed >= a.boltSpeed, `bolts quicken into ${i + 1}`);
+    assert.ok(b.swayAmp >= a.swayAmp, `sway widens into ${i + 1}`);
+    assert.ok(b.alienSpeed[1] >= a.alienSpeed[1]);
+  }
+  for (let i = 1; i < nonBoss.length; i += 1) {
+    assert.ok(nonBoss[i].spawnMs < nonBoss[i - 1].spawnMs, 'spawn gap shrinks');
+    assert.ok(nonBoss[i].goal > nonBoss[i - 1].goal, 'kill target grows');
+  }
+  for (let i = 1; i < bosses.length; i += 1) {
+    assert.ok(bosses[i].boss.hp > bosses[i - 1].boss.hp, 'each boss is tougher');
+  }
+});
+
+/** Kill every saucer the moment it appears (a perfect, invisible gunner). */
+function autoKill(p, now) {
+  for (const a of p.aliens) {
+    if (a.dead) continue;
+    p.bolts.push({ x: a.x, z: a.z, born: p.z });
+  }
+  void now;
+}
+
+test('clearing the kill target opens an intermission, then the next sector', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e), seed: 3 });
+  p.start(0);
+  p.lives = 2;                                  // carried, not refilled
+  let now = 0;
+  while (p.state === 'running' && now < 120_000) {
+    now += 10;
+    autoKill(p, now);
+    p.update(now, 0.01);
+  }
+  assert.equal(p.state, 'cleared');
+  const cleared = events.find((e) => e.type === 'cleared');
+  assert.equal(cleared.level, 1);
+  assert.equal(cleared.kills, LEVELS[0].goal);
+  assert.equal(cleared.next, 2);
+  assert.equal(cleared.flawless, true);
+  assert.equal(cleared.bonus, CLEAR_POINTS * 1 + FLAWLESS_POINTS);
+  assert.equal(p.aliens.length, 0, 'the sky is swept');
+  assert.equal(p.alienBolts.length, 0);
+
+  // The intermission flies on its own: no spawns, steering still live.
+  const clearedAt = now;
+  const x0 = p.x;
+  p.setSteer(STEER_FULL);
+  while (now < clearedAt + INTERMISSION_MS - 20) { now += 10; p.update(now, 0.01); }
+  assert.equal(p.state, 'cleared');
+  assert.equal(p.aliens.length, 0);
+  assert.ok(p.x > x0, 'you can still steer during the intermission');
+  now += 40; p.update(now, 0.01);
+  assert.equal(p.state, 'running');
+  assert.equal(p.level, 2);
+  assert.equal(p.levelKills, 0);
+  assert.equal(p.lives, 2, 'lives carry across sectors');
+  assert.equal(p.kills, LEVELS[0].goal, 'run kills carry too');
+  assert.ok(events.some((e) => e.type === 'level' && e.level === 2));
+});
+
+test('start(level) drops straight into that sector', () => {
+  const p = new Patrol({});
+  p.start(0, 6);
+  assert.equal(p.level, 6);
+  assert.equal(p.startLevel, 6);
+  assert.equal(p.speed, LEVELS[5].speed);
+  assert.equal(p.lives, LIVES);
+  p.start(0, 42);
+  assert.equal(p.level, LEVELS.length, 'clamped to the last sector');
+});
+
+test('the armoured saucer survives one hit and dies on the second', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e) });
+  p.start(0, 3);
+  p.nextSpawnMs = Infinity;
+  const a = p.spawnAlien(0, 'tank');
+  assert.equal(a.hp, 2);
+  a.x0 = p.x; a.swayAmp = 0; a.speed = 0; a.nextFireMs = Infinity;
+  a.z = p.z + 40;                             // well inside bolt range
+  p.shoot(10);
+  drive(p, 1.0, 0.01);
+  assert.equal(p.kills, 0, 'one hit is not enough');
+  assert.equal(a.hp, 1);
+  assert.ok(p.aliens.includes(a));
+  assert.ok(events.some((e) => e.type === 'armor'));
+  p.shoot(2000);
+  let now = 2000;
+  for (let i = 0; i < 100; i += 1) { now += 10; p.update(now, 0.01); }
+  assert.equal(p.kills, 1);
+  assert.ok(!p.aliens.includes(a));
+  assert.equal(p.score, KILL_POINTS + TANK_BONUS + Math.floor(p.z));
+});
+
+test('the zig-zagger sweeps the lane in straight legs', () => {
+  assert.equal(tri(0), 0);
+  assert.equal(tri(0.25), 1);
+  assert.equal(tri(0.75), -1);
+  assert.ok(Math.abs(tri(0.125) - 0.5) < 1e-9, 'linear between turns');
+  const p = new Patrol({});
+  p.start(0, 2);
+  p.nextSpawnMs = Infinity;
+  const a = p.spawnAlien(0, 'zigzag');
+  a.speed = 0;
+  let lo = Infinity; let hi = -Infinity;
+  drive(p, 4, 0.01, () => { lo = Math.min(lo, a.x); hi = Math.max(hi, a.x); });
+  assert.ok(hi - lo > ZIG_AMP * 1.8, `it crosses ${(hi - lo).toFixed(1)}m of lane`);
+  assert.ok(Math.abs(hi) <= LANE_HALF && Math.abs(lo) <= LANE_HALF);
+});
+
+test('the diver winds up in range, then charges where the ship was', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e) });
+  p.start(0, 6);
+  p.nextSpawnMs = Infinity;
+  const a = p.spawnAlien(0, 'diver');
+  a.x0 = 5; a.swayAmp = 0;
+  let now = 0;
+  while (a.mode === 'cruise' && now < 20_000) { now += 10; p.update(now, 0.01); }
+  assert.equal(a.mode, 'windup');
+  assert.ok(a.z - p.z < DIVER_LOCK_RANGE + 1);
+  const gapAtWindup = a.z - p.z;
+  while (a.mode === 'windup') { now += 10; p.update(now, 0.01); }
+  assert.ok(Math.abs(a.z - p.z - gapAtWindup) < 6, 'it nearly holds station while it glows');
+  assert.equal(a.mode, 'dive');
+  assert.equal(a.targetX, p.x, 'locked onto the ship');
+  assert.ok(events.some((e) => e.type === 'windup') && events.some((e) => e.type === 'dive'));
+  assert.ok(!events.some((e) => e.type === 'alienFire'), 'divers never shoot');
+  // Hold still: it lands.
+  while (p.aliens.includes(a) && now < 30_000) { now += 10; p.update(now, 0.01); }
+  assert.equal(p.lives, LIVES - 1, 'a diver you ignore rams you');
+  void DIVER_WINDUP_MS;
+});
+
+test('a dodged diver sails past', () => {
+  const p = new Patrol({});
+  p.start(0, 6);
+  p.nextSpawnMs = Infinity;
+  const a = p.spawnAlien(0, 'diver');
+  a.x0 = 0; a.swayAmp = 0;
+  let now = 0;
+  while (a.mode !== 'dive') { now += 10; p.update(now, 0.01); }
+  p.setSteer(STEER_FULL);                     // break hard right
+  while (p.aliens.includes(a) && now < 30_000) { now += 10; p.update(now, 0.01); }
+  assert.equal(p.lives, LIVES);
+});
+
+test('the boss warps in, holds station, fires volleys, and takes many hits', () => {
+  const events = [];
+  let fanned = false;
+  const p = new Patrol({
+    onEvent: (e) => {
+      events.push(e);
+      if (e.type === 'bossFire') fanned ||= p.alienBolts.some((b) => b.vx);
+    },
+  });
+  p.start(0, 5);
+  p.nextSpawnMs = Infinity;
+  p.invulnUntil = Infinity;                   // just watch it work
+  let now = 0;
+  while (!p.boss) { now += 10; p.update(now, 0.01); }
+  assert.ok(now >= BOSS_DELAY_MS);
+  const boss = p.boss;
+  assert.equal(boss.hp, LEVELS[4].boss.hp);
+  for (let i = 0; i < 600; i += 1) { now += 10; p.update(now, 0.01); }
+  assert.ok(Math.abs(boss.z - p.z - BOSS_HOLD) < 1, 'it rides ahead at its station');
+  const volleys = events.filter((e) => e.type === 'bossFire');
+  assert.ok(volleys.length >= 1, 'it shoots back');
+  assert.ok(fanned, 'a fanned spread, not a single line');
+
+  // Hit it repeatedly: progress climbs, one short of dead it lives.
+  p.alienBolts = [];
+  const hp = boss.hp;
+  for (let k = 0; k < hp - 1; k += 1) {
+    p.bolts.push({ x: boss.x, z: boss.z, born: p.z });
+    now += 10; p.update(now, 0.01);
+  }
+  assert.equal(boss.hp, 1);
+  assert.equal(p.boss, boss, 'still alive on its last hit point');
+  assert.ok(p.progress > 0.9 && p.progress < 1);
+  assert.equal(p.state, 'running');
+});
+
+/** Run until the boss is on station (inside bolt range). */
+function awaitBoss(p, now) {
+  while (!p.boss || p.boss.gap > BOSS_HOLD + 0.5) { now += 10; p.update(now, 0.01); }
+  return now;
+}
+
+test('killing the boss clears the sector with a bonus and a life back', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e) });
+  p.start(0, 5);
+  p.nextSpawnMs = Infinity;
+  p.lives = 2;
+  p.invulnUntil = Infinity;                   // isolate the kill from return fire
+  let now = awaitBoss(p, 0);
+  p.alienBolts = [];
+  const before = p.bonus;
+  p.boss.hp = 1;
+  p.bolts.push({ x: p.boss.x, z: p.boss.z, born: p.z });
+  now += 10; p.update(now, 0.01);
+  assert.equal(p.boss, null);
+  assert.ok(events.some((e) => e.type === 'bossDown' && e.extraLife));
+  assert.equal(p.lives, 3, '+1 life');
+  assert.equal(p.state, 'cleared');
+  assert.ok(p.bonus >= before + BOSS_POINTS);
+  // At full health the extra life is capped.
+  const q = new Patrol({});
+  q.start(0, 5);
+  q.nextSpawnMs = Infinity;
+  q.invulnUntil = Infinity;
+  now = awaitBoss(q, 0);
+  q.boss.hp = 1;
+  q.bolts.push({ x: q.boss.x, z: q.boss.z, born: q.z });
+  now += 10; q.update(now, 0.01);
+  assert.equal(q.lives, LIVES, 'capped at max');
+});
+
+test('beating the final sector ends the run as a win', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e) });
+  p.start(0, LEVELS.length);
+  p.nextSpawnMs = Infinity;
+  p.invulnUntil = Infinity;
+  let now = awaitBoss(p, 0);
+  assert.ok(p.boss.final);
+  p.boss.hp = 1;
+  p.bolts.push({ x: p.boss.x, z: p.boss.z, born: p.z });
+  now += 10; p.update(now, 0.01);
+  assert.equal(p.state, 'done');
+  assert.equal(p.won, true);
+  const done = events.find((e) => e.type === 'done');
+  assert.equal(done.won, true);
+  assert.equal(done.level, LEVELS.length);
+  assert.ok(events.find((e) => e.type === 'cleared').final);
+});
+
+test('dying mid-sector is a loss on that sector', () => {
+  const events = [];
+  const p = new Patrol({ onEvent: (e) => events.push(e) });
+  p.start(0, 4);
+  p.lives = 1;
+  p.alienBolts.push({ x: p.x, z: p.z + 0.5 });
+  drive(p, 0.5, 0.01);
+  const done = events.find((e) => e.type === 'done');
+  assert.equal(done.won, false);
+  assert.equal(done.level, 4);
+});
+
+// ── Progression storage ────────────────────────────────────────────────────
+
+function memStore(init = {}) {
+  const m = new Map(Object.entries(init));
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), m };
+}
+
+test('progress: round-trips unlocks and best score', () => {
+  const s = memStore();
+  assert.deepEqual(loadProgress(s), defaultProgress());
+  let p = unlockLevel(defaultProgress(), 4);
+  p = recordScore(p, 12345);
+  assert.equal(saveProgress(s, p), true);
+  assert.deepEqual(loadProgress(s), { unlocked: 4, best: 12345 });
+  // Never goes backwards.
+  p = recordScore(unlockLevel(p, 2), 10);
+  assert.deepEqual(p, { unlocked: 4, best: 12345 });
+  assert.equal(unlockLevel(p, 99).unlocked, LEVELS.length);
+});
+
+test('progress: missing, corrupt or throwing storage falls back to defaults', () => {
+  assert.deepEqual(loadProgress(null), defaultProgress());
+  assert.deepEqual(loadProgress(memStore({ [PROGRESS_KEY]: '{not json' })), defaultProgress());
+  assert.deepEqual(loadProgress(memStore({ [PROGRESS_KEY]: '"str"' })), defaultProgress());
+  assert.deepEqual(loadProgress(memStore({ [PROGRESS_KEY]: 'null' })), defaultProgress());
+  assert.deepEqual(
+    loadProgress(memStore({ [PROGRESS_KEY]: JSON.stringify({ unlocked: 400, best: -5 }) })),
+    { unlocked: LEVELS.length, best: 0 }, 'out-of-range values are clamped');
+  assert.deepEqual(
+    loadProgress(memStore({ [PROGRESS_KEY]: JSON.stringify({ unlocked: 'x', best: 'y' }) })),
+    defaultProgress());
+  const angry = {
+    getItem: () => { throw new Error('SecurityError'); },
+    setItem: () => { throw new Error('QuotaExceeded'); },
+  };
+  assert.deepEqual(loadProgress(angry), defaultProgress());
+  assert.equal(saveProgress(angry, { unlocked: 3, best: 1 }), false);
+  assert.equal(saveProgress(null, { unlocked: 3, best: 1 }), false);
+});
+
+test('level select: one step per press, clamped to what is unlocked', () => {
+  assert.equal(stepLevel(1, -1, 5), 1);
+  assert.equal(stepLevel(1, 1, 5), 2);
+  assert.equal(stepLevel(5, 1, 5), 5, 'locked sectors stay locked');
+  assert.equal(stepLevel(3, 1, 1), 1);
+  assert.equal(stepLevel(LEVELS.length, 1, 99), LEVELS.length);
 });

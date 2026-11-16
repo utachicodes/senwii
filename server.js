@@ -76,7 +76,7 @@ function listGames() {
   return entries
     .filter((e) => e.isDirectory() && fs.existsSync(path.join(GAMES_DIR, e.name, 'index.html')))
     .map((e) => {
-      const meta = { title: e.name, tagline: '', emoji: '🎮' };
+      const meta = { title: e.name, tagline: '', icon: 'gamepad' };
       try {
         Object.assign(meta, JSON.parse(fs.readFileSync(path.join(GAMES_DIR, e.name, 'game.json'), 'utf8')));
       } catch { /* game.json is optional */ }
@@ -371,7 +371,7 @@ io.on('connection', (socket) => {
 server.listen(PORT, '0.0.0.0', () => {
   const line = '─'.repeat(52);
   console.log(`\n${line}`);
-  console.log('  🕹  SenWii — your phone is the remote');
+  console.log('  SenWii — your phone is the remote');
   console.log(line);
   if (TRUST_PROXY) {
     console.log(`  Listening     http://0.0.0.0:${PORT} (plain HTTP — behind a TLS-terminating edge)`);
@@ -381,15 +381,15 @@ server.listen(PORT, '0.0.0.0', () => {
   }
   const games = listGames();
   console.log(`\n  ${games.length} game${games.length === 1 ? '' : 's'}:`);
-  for (const g of games) console.log(`    ${g.emoji}  ${g.title}  →  ${g.url}`);
+  for (const g of games) console.log(`    ${g.title.padEnd(16)} →  ${g.url}`);
   if (TRUST_PROXY) {
-    console.log('\n  ☁  TRUST_PROXY mode: pairing URLs are built from each request\'s');
+    console.log('\n  [proxy] TRUST_PROXY mode: pairing URLs are built from each request\'s');
     console.log('     own Host header, not a scanned LAN address.');
   } else if (!tls) {
-    console.log('\n  ⚠  Running plain HTTP. Phone sensors will NOT work off');
+    console.log('\n  [!] Running plain HTTP. Phone sensors will NOT work off');
     console.log('     localhost — browsers gate the IMU behind a secure context.');
   } else {
-    console.log('\n  ⚠  Self-signed cert: the phone will show a warning once.');
+    console.log('\n  [!] Self-signed cert: the phone will show a warning once.');
     console.log('     Tap Advanced → Proceed. Sensors need HTTPS to unlock.');
   }
 
@@ -401,7 +401,7 @@ server.listen(PORT, '0.0.0.0', () => {
     exec('open -na "Google Chrome" --args'
       + ' --user-data-dir="$HOME/.openwii-chrome" --no-first-run --no-default-browser-check'
       + ` --autoplay-policy=no-user-gesture-required --new-window https://localhost:${PORT}/`);
-    console.log('\n  📺 Opening the console in Chrome (autoplay enabled)…');
+    console.log('\n  [tv] Opening the console in Chrome (autoplay enabled)…');
     console.log('     Skip with NO_OPEN=1 npm start.');
   }
   console.log(`${line}\n`);

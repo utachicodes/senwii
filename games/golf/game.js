@@ -8,6 +8,7 @@ import { SwingDetector } from '../../core/gesture.js';
 import {
   Hole, HOLE, GREEN_RADIUS, terrainHeight, PAR, pickClub,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Golf — renderer. One par-4 hole from logic.js. Aim with the pointer,
@@ -146,7 +147,7 @@ function handleEvent(e) {
   } else if (e.type === 'holed') {
     const diff = e.strokes - PAR;
     const name = SCORE_NAMES[diff] ?? (diff > 0 ? `+${diff}` : `${diff}`);
-    $('panel').innerHTML = `<h1>⛳ <em>${name}!</em></h1>
+    $('panel').innerHTML = `<h1>${icon('golf')} <em>${name}!</em></h1>
       <p>Holed in ${e.strokes} (par ${PAR}).</p>
       <div class="cta"><strong>A</strong> play again · <strong>B</strong> menu</div>`;
     $('overlay').classList.remove('hide');
@@ -240,3 +241,5 @@ window.__senwii = {
   hole, channel, pointer: channel.pointer, scene, camera, renderer, step, startRound,
   fps: () => fps,
 };
+
+hydrateIcons();

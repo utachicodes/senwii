@@ -6,6 +6,7 @@ import { createChannel } from '../../core/channel.js';
 import {
   Range, FIELD_W, FIELD_H, ROUND_MS, GOLD_POINTS, BOMB_PENALTY,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Shooting Range — renderer. A sunny Wii Play meadow filling the whole
@@ -337,7 +338,7 @@ function handleEvent(e) {
     audio.play('sr-miss');
   } else if (e.type === 'done') {
     const pct = Math.round(e.accuracy * 100);
-    $('panel').innerHTML = `<h1>🎯 <em>Time!</em></h1>
+    $('panel').innerHTML = `<h1>${icon('target')} <em>Time!</em></h1>
       <div>
         <span class="stat"><b>${e.score}</b><span>score</span></span>
         <span class="stat"><b>${e.hits}/${e.shots}</b><span>hits</span></span>
@@ -586,3 +587,5 @@ requestAnimationFrame(frame);
 // screen; the first target holds off a moment while the splash fades.
 startRound();
 range.nextSpawnMs = performance.now() + 1600;
+
+hydrateIcons();

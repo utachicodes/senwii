@@ -8,6 +8,7 @@ import { ParticleBurst, dotTexture, canvasTexture } from '../shared/fx.js';
 import {
   Match, TABLE, GOAL_WIDTH, PLAYER_Z, AI_Z, PUCK_RADIUS, PADDLE_RADIUS,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Air Hockey — renderer. The rally runs in logic.js; the pointer's full
@@ -228,7 +229,7 @@ function handleEvent(e) {
       break;
     case 'over': {
       const won = e.winner === 'player';
-      $('panel').innerHTML = `<h1>${won ? '🏆 <em>You win!</em>' : '💀 <em>Defeated</em>'}</h1>
+      $('panel').innerHTML = `<h1>${won ? `${icon('trophy')} <em>You win!</em>` : `${icon('skull')} <em>Defeated</em>`}</h1>
         <p>Final score ${match.score.player}-${match.score.ai}.</p>
         <div class="cta"><strong>A</strong> rematch · <strong>B</strong> menu</div>`;
       $('overlay').classList.remove('hide');
@@ -316,3 +317,5 @@ window.__senwii = {
   scene, camera, renderer, step, startMatch,
   fps: () => fps,
 };
+
+hydrateIcons();

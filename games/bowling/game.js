@@ -5,10 +5,11 @@ import { consumeLaunchSplash } from '../../core/splash.js';
 const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 import { ParticleBurst, dotTexture, canvasTexture } from '../shared/fx.js';
 import {
-  Game, LANE, HEADPIN_Z, PIN_RADIUS, PATTERNS, patternById,
-  frameCards, loadBowlSave, persistBowlSave,
+  Game, LANE, HEADPIN_Z, PATTERNS,
+  frameCards, loadBowlSave, persistBowlSave, previewPath,
 } from './logic.js';
 
 /**
@@ -209,6 +210,8 @@ let patternIndex = 0;
 let started = false;
 let shake = 0;
 let lastHookHint = 0;      // remembered hook from the previous delivery
+const AIM_SPAN = 0.7;      // metres either side of centre at the pins, screen edge to edge
+let previewKey = '';
 
 function syncPatterns() {
   const wrap = $('patterns');
@@ -219,7 +222,7 @@ function syncPatterns() {
     const best = bowlSave.best[p.id];
     const card = document.createElement('div');
     card.className = `pat${i === patternIndex ? ' sel' : ''}${unlocked ? '' : ' locked'}`;
-    card.innerHTML = `<div class="pe">${unlocked ? p.emoji : '🔒'}</div>
+    card.innerHTML = `<div class="pe">${icon(unlocked ? p.icon : 'lock')}</div>
       <div class="pn">${p.name}</div>
       <div class="pd">${unlocked ? (best ? `best ${best}` : p.desc) : `score ${p.unlockAt}+ to unlock`}</div>`;
     wrap.appendChild(card);
@@ -236,18 +239,17 @@ function applyPattern(i) {
 }
 
 function changePattern(delta) {
-  if (game.state === 'roll' || game.state === 'sweep') return;
+  // The lane is picked on the menus only: switching mid-game would throw the
+  // game in progress away. startGame() reads patternIndex for the next one.
+  if (started && game.state !== 'over') return;
   let i = patternIndex;
+  let next = patternIndex;
   for (let s = 0; s < PATTERNS.length; s += 1) {
     i = (i + delta + PATTERNS.length) % PATTERNS.length;
-    if (i < bowlSave.unlocked) { patternIndex = i; break; }
+    if (i < bowlSave.unlocked) { next = i; break; }
   }
-  applyPattern(patternIndex);
-  if (started && game.state !== 'over') {
-    game = new Game({ onEvent: handleEvent, pattern: patternIndex, animateSweep: true });
-    rebuildPins();
-    syncHud();
-  }
+  if (next === patternIndex) return;      // nothing else unlocked yet
+  applyPattern(next);
   channel.audio.play('hover');
 }
 
@@ -270,7 +272,7 @@ function syncHud() {
   $('score').textContent = String(game.score());
   $('ball-no').textContent = `ball ${game.ballInFrame + 1}`;
   const tag = $('patternTag');
-  if (tag) tag.textContent = `${game.pattern.emoji} ${game.pattern.name} lane`;
+  if (tag) tag.innerHTML = `${icon(game.pattern.icon)} ${game.pattern.name} lane`;
   renderScoreboard();
 }
 
@@ -286,7 +288,12 @@ let hookSamples = 0;
 
 const channel = createChannel({
   room: launchData?.room,
-  onA: () => { if (!started || game.state === 'over') startGame(); },
+  onA: () => {
+    if (!started || game.state === 'over') startGame();
+    // Hold-to-charge is the desk fallback only: with a phone connected the
+    // ball goes by swinging, and a stray A tap must not auto-bowl.
+    else if (game.state === 'aim' && !charge && !channel.pointer.live) beginCharge();
+  },
   onCommand: (cmd) => {
     if (cmd.type === 'button') {
       if (cmd.menuDirection === 'up' || cmd.button === 'up') changePattern(-1);
@@ -314,18 +321,20 @@ const channel = createChannel({
       const power = Math.min(1, Math.max(0.12, s.peak / 420));
       // Hook from the swing's travel vector (how sideways the hand moved)
       // blended with the accumulated instant bias.
-      const travelMag = Math.hypot(s.vx, s.vy) || 1;
-      const travelHook = s.vx / travelMag;           // -1..1, + = swept right
+      const travelMag = Math.hypot(s.vx, s.vy);
+      const travelHook = travelMag > 0 ? s.vx / travelMag : 0;   // -1..1, + = swept right
       const instantHook = hookSamples ? hookAccum / hookSamples : 0;
       let hook = travelHook * 0.55 + instantHook * 0.45;
-      // Scale: a mostly-forward swing keeps a gentle hook; a very sideways
-      // slash caps out. Also damp tiny wiggles.
-      hook = Math.max(-1, Math.min(1, hook * 1.6));
-      if (Math.abs(hook) < 0.08) hook = 0;
+      // Scale: a mostly-forward swing keeps a gentle hook (a 15° sideways
+      // lean ≈ 0.35 spin, a ~30 cm break on the house pattern); a very
+      // sideways slash caps out. Damp tiny wiggles; never pass on a NaN.
+      hook = Number.isFinite(hook) ? Math.max(-1, Math.min(1, hook * 1.4)) : 0;
+      if (Math.abs(hook) < 0.1) hook = 0;
       lastHookHint = hook;
 
       const launched = game.roll(power, undefined, hook);
       if (launched) {
+        cancelCharge();
         channel.feedback({ type: 'slice', combo: Math.abs(hook) > 0.35 ? 2 : 1 });
         channel.audio.play('bw-release');
         flashPower(power, hook);
@@ -386,6 +395,36 @@ function startGame() {
   syncHud();
 }
 
+// ── Desk fallback: hold A / Space / click to charge, release to bowl ──────
+// Power grows with the hold (full at 1s). The phone's A has no release
+// event, so a charge also lets go by itself after CHARGE_MAX_MS.
+const CHARGE_FULL_MS = 1000;
+const CHARGE_MAX_MS = 1500;
+let charge = null;          // { t0 } while charging
+
+function chargePower(now) {
+  return 0.3 + 0.7 * Math.min(1, (now - charge.t0) / CHARGE_FULL_MS);
+}
+function beginCharge() {
+  charge = { t0: performance.now() };
+  $('power').style.width = '30%';
+  $('powerwrap').classList.add('on');
+}
+function cancelCharge() { charge = null; }
+function releaseCharge() {
+  if (!charge) return;
+  const power = chargePower(performance.now());
+  charge = null;
+  if (!started || game.state !== 'aim') return;
+  lastHookHint = 0;
+  if (game.roll(power, undefined, 0)) {
+    channel.audio.play('bw-release');
+    flashPower(power, 0);
+  }
+}
+window.addEventListener('pointerup', releaseCharge);
+window.addEventListener('blur', cancelCharge);
+
 function flashPower(p, hook) {
   const el = $('power');
   el.style.width = `${Math.round(p * 100)}%`;
@@ -417,17 +456,13 @@ function handleEvent(e) {
     }
   } else if (e.type === 'settled') {
     syncHud();
-    // spare detection in the 10th frame is a little special, but in general:
-    const prev = game.rolls[game.rolls.length - 2];
-    const frameBall = game.ballInFrame; // already incremented by planAdvance
-    const isSpare = frameBall === 2 && prev !== 10 && (prev + e.pinsDown === 10)
-      || (frameBall === 3); // 10th-frame bonus conversion handled loosely
-    if (e.pinsDown === 10 && frameBall !== 3) { audio.play('bw-strike'); shake = 1; }
-    else if (isSpare && e.pinsDown !== 10) audio.play('bw-spare');
+    // The logic decides strike/spare (it knows the rack the ball faced).
+    if (e.strike) { audio.play('bw-strike'); shake = 1; }
+    else if (e.spare) audio.play('bw-spare');
     else if (e.pinsDown === 0) audio.play('bw-gutter');
     else audio.play('bw-pins', { pins: e.pinsDown });
-    const label = e.pinsDown === 10 ? 'STRIKE!'
-      : (frameBall === 2 && prev !== 10 && prev + e.pinsDown === 10) ? 'SPARE!'
+    const label = e.strike ? 'STRIKE!'
+      : e.spare ? 'SPARE!'
       : e.pinsDown === 0 ? 'GUTTER' : `${e.pinsDown} pin${e.pinsDown === 1 ? '' : 's'}`;
     $('banner').textContent = label;
     $('banner').classList.add('on');
@@ -447,8 +482,8 @@ function handleEvent(e) {
     bowlSave.unlocked = Math.max(bowlSave.unlocked, Math.min(PATTERNS.length, unlocked));
     persistBowlSave(bowlSave);
 
-    $('panel').innerHTML = `<h1>🎳 <em>Game over</em></h1>
-      <p>${game.pattern.emoji} ${game.pattern.name} lane — final score <strong>${e.score}</strong> / 300.</p>
+    $('panel').innerHTML = `<h1>${icon('pin')} <em>Game over</em></h1>
+      <p>${icon(game.pattern.icon)} ${game.pattern.name} lane — final score <strong>${e.score}</strong> / 300.</p>
       <div id="patterns"></div>
       <div class="cta"><strong>A</strong> play again · <strong>↑↓</strong> pick lane · <strong>B</strong> menu</div>`;
     syncPatterns();
@@ -467,15 +502,12 @@ window.addEventListener('keydown', (e) => {
   keys[e.key] = true;
   if (e.key === 'ArrowUp') { e.preventDefault(); changePattern(-1); }
   if (e.key === 'ArrowDown') { e.preventDefault(); changePattern(1); }
-  // desk-test: space/enter starts (handled by channel) or delivers a straight
-  // medium ball while aiming
-  if ((e.key === 'r' || e.key === 'R') && started && game.state === 'aim') {
-    game.roll(0.7, undefined, 0);
-    channel.audio.play('bw-release');
-    flashPower(0.7, 0);
-  }
+  // Space/Enter start a charge via the channel's onA; release bowls.
 });
-window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+window.addEventListener('keyup', (e) => {
+  keys[e.key] = false;
+  if (e.key === ' ' || e.key === 'Enter') releaseCharge();
+});
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -486,14 +518,22 @@ function frame(now) {
   if (now - fpsMark >= 500) { fps = (frames * 1000) / (now - fpsMark); frames = 0; fpsMark = now; }
 
   const aim = channel.poll(now);
-  if (game.state === 'aim') game.aimOffset = (aim.x - 0.5) * 0.9;
+  // The pointer picks the spot the ball would cross the headpin line at
+  // (straight): the full screen spans ±AIM_SPAN m there — the lane, its
+  // gutters, and room to aim off-centre and let the hook bring it back.
+  if (game.state === 'aim' && Number.isFinite(aim.x)) {
+    const target = (Math.max(0, Math.min(1, aim.x)) - 0.5) * 2 * AIM_SPAN;
+    game.aimOffset = Math.atan2(target, HEADPIN_Z);
+  }
 
-  // Desk-test fallback: mouse click to bowl a straight shot at pointer aim.
-  // (pointerdown already fires onA for start; here we let a click during aim
-  // deliver if no swing came in recently — handled by R key above for clarity.)
+  if (charge) {
+    if (!started || game.state !== 'aim') cancelCharge();
+    else if (now - charge.t0 > CHARGE_MAX_MS) releaseCharge();
+    else $('power').style.width = `${Math.round(chargePower(now) * 100)}%`;
+  }
 
   game.update(now, dt);
-  if (game.pins !== pinsRef) rebuildPins();
+  if (game.pins !== pinsRef) { rebuildPins(); syncHud(); }   // after any sweep
   burst.update(dt);
   step(now, dt);
   renderer.render(scene, camera);
@@ -549,18 +589,16 @@ function step(now, dt) {
     const az = Math.cos(game.aimOffset) * 1.2;
     aimArrow.position.set(ax, 0.3, az);
     aimArrow.rotation.z = -game.aimOffset;
-    // Preview arc: simulate a gentle hook from the remembered release.
-    const pts = [];
-    const h = lastHookHint * 0.5;
-    let px = 0; let pz = 0; let vx = Math.sin(game.aimOffset); let vz = Math.cos(game.aimOffset);
-    for (let i = 0; i < 28; i += 1) {
-      pts.push(new THREE.Vector3(px, 0.02, pz));
-      px += vx * 0.55; pz += vz * 0.55;
-      vx += h * 0.03; // curve
-      if (pz > HEADPIN_Z - 0.4) break;
+    // Preview arc: the real physics, ghost-rolled with the remembered hook
+    // at medium pace (only re-run when the aim or hook actually changes).
+    const key = `${game.aimOffset.toFixed(4)}|${lastHookHint}|${game.patternIndex}`;
+    if (key !== previewKey) {
+      previewKey = key;
+      const pts = previewPath(game.patternIndex, game.aimOffset, lastHookHint)
+        .map((p) => new THREE.Vector3(p.x, 0.02, p.z));
+      hookLine.geometry.dispose();
+      hookLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
     }
-    hookLine.geometry.dispose();
-    hookLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
   }
 
   shake = Math.max(0, shake - dt * 2.2);
@@ -601,6 +639,7 @@ setInterval(() => {
   ].join('\n');
 }, 250);
 
+hydrateIcons();
 applyPattern(0);
 syncPatterns();
 syncHud();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Game, scoreRolls, standardPins, LANE } from './logic.js';
+import { Game, scoreRolls, standardPins, frameCards, previewPath, PATTERNS, LANE, HEADPIN_Z } from './logic.js';
 
 // ── Scoring algorithm, tested against the flat rolls[] list directly ──────
 test('a perfect game (12 strikes) scores 300', () => {
@@ -150,4 +150,124 @@ test('update() is a no-op outside the roll state', () => {
 test('LANE half-width is positive and narrower than the full lane length', () => {
   assert.ok(LANE.HALF_WIDTH > 0);
   assert.ok(LANE.HALF_WIDTH < LANE.LENGTH);
+});
+
+// ── 10th frame: strike then non-strike keeps the leftovers ─────────────────
+function intoTenth(g) {
+  for (let f = 0; f < 9; f += 1) { knockN(g, 0); knockN(g, 0); }
+  assert.equal(g.frameIndex, 9);
+}
+
+test('10th frame X then 7: the bonus ball faces the 3 left standing, not a fresh rack', () => {
+  const g = new Game();
+  intoTenth(g);
+  knockAll(g);                     // X
+  knockN(g, 7);                    // 7 of a fresh rack
+  assert.equal(g.state, 'aim', 'bonus ball still to come');
+  assert.equal(g.standingCount(), 3, 'the leftovers stay');
+  knockAll(g);                     // converts the 3
+  assert.equal(g.state, 'over');
+  assert.deepEqual(g.rolls.slice(-3), [10, 7, 3]);
+  assert.deepEqual(frameCards(g.rolls)[9].marks, ['X', '7', '/']);
+  assert.equal(g.score(), 20);
+});
+
+test('10th frame X X: the third ball gets a fresh rack', () => {
+  const g = new Game();
+  intoTenth(g);
+  knockAll(g);
+  knockAll(g);
+  assert.equal(g.state, 'aim');
+  assert.equal(g.standingCount(), 10);
+  knockN(g, 4);
+  assert.equal(g.state, 'over');
+  assert.equal(g.score(), 24);
+});
+
+// ── settled carries the strike/spare verdict ───────────────────────────────
+function settledEvents(g) {
+  const out = [];
+  g.onEvent = (e) => { if (e.type === 'settled') out.push(e); };
+  return out;
+}
+
+test('settled flags a normal spare and a strike', () => {
+  const g = new Game();
+  const ev = settledEvents(g);
+  knockN(g, 6); knockAll(g);       // 6 /
+  knockAll(g);                     // X
+  knockN(g, 3); knockN(g, 2);      // open
+  assert.deepEqual(ev.map((e) => [e.strike, e.spare]),
+    [[false, false], [false, true], [true, false], [false, false], [false, false]]);
+});
+
+test('settled flags in the 10th: bonus strikes are strikes, X-then-9 is no spare', () => {
+  const g = new Game();
+  intoTenth(g);
+  const ev = settledEvents(g);
+  knockAll(g); knockN(g, 9); knockN(g, 0);        // X 9 -
+  assert.deepEqual(ev.map((e) => [e.strike, e.spare]), [[true, false], [false, false], [false, false]]);
+  const h = new Game();
+  intoTenth(h);
+  const ev2 = settledEvents(h);
+  knockN(h, 6); knockAll(h); knockAll(h);         // 6 / X
+  assert.deepEqual(ev2.map((e) => [e.strike, e.spare]), [[false, false], [false, true], [true, false]]);
+});
+
+// ── Robustness and pinfall ─────────────────────────────────────────────────
+function rollOut(g) {
+  for (let i = 0; i < 5000 && g.state === 'roll'; i += 1) g.update(i * 16, 0.016);
+}
+
+test('a NaN spin/power from a bad sensor read still bowls a real ball', () => {
+  const g = new Game();
+  g.roll(NaN, 0, NaN);
+  assert.ok(Number.isFinite(g.ball.spin) && Number.isFinite(g.ball.vz));
+  rollOut(g);
+  assert.ok(g.rolls[0] > 0, `a straight ball hits pins (${g.rolls[0]})`);
+});
+
+test('pinfall is graded: mid-power off-centre rolls leave partial counts', () => {
+  const counts = new Set();
+  for (let tx = -0.3; tx <= 0.3; tx += 0.05) {
+    const g = new Game();
+    g.roll(0.5, Math.atan2(tx, HEADPIN_Z), 0);
+    rollOut(g);
+    counts.add(g.rolls[0]);
+  }
+  const partial = [...counts].filter((n) => n > 0 && n < 8);
+  assert.ok(partial.length >= 2, `several partial counts, got ${[...counts].sort((a, b) => a - b)}`);
+});
+
+test('a gentle nudge tips one pin without felling the rack', () => {
+  const g = new Game();
+  g.knockPin(g.pins[9], 0, 2);     // back-row corner, pushed into the pit
+  assert.equal(g.standingCount(), 9);
+  const h = new Game();
+  h.knockPin(h.pins[0], 0, 0.5);   // below the topple threshold: a wobble
+  assert.equal(h.standingCount(), 10);
+});
+
+test('the ball is back on the approach after the pins are swept', () => {
+  const g = new Game();
+  g.roll(0.5, 0.02, 0);
+  rollOut(g);
+  assert.equal(g.state, 'aim');
+  assert.equal(g.ball.z, 0);
+  assert.equal(g.ball.x, 0);
+});
+
+test('previewPath follows the real ball and the hook bends it', () => {
+  const straight = previewPath(0, 0, 0);
+  const hooked = previewPath(0, 0, 0.5);
+  assert.ok(straight.at(-1).z > HEADPIN_Z - 1, 'reaches the pin deck');
+  assert.ok(Math.abs(straight.at(-1).x) < 1e-6);
+  assert.ok(hooked.at(-1).x > 0.1, `positive spin breaks right (${hooked.at(-1).x.toFixed(2)})`);
+});
+
+test('patterns name an icon (logic stays DOM-free, no emoji)', () => {
+  for (const p of PATTERNS) {
+    assert.equal(typeof p.icon, 'string');
+    assert.equal(p.emoji, undefined);
+  }
 });

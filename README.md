@@ -36,7 +36,7 @@ games/<slug>/     One folder per game, each with its own index.html.
 ```
 
 A game is any folder under `games/` containing an `index.html`. No registry to
-edit: the server scans on boot. `game.json` (title/tagline/emoji) is optional
+edit: the server scans on boot. `game.json` (title/tagline/icon) is optional
 and only feeds the launcher card.
 
 ## Things that will bite you

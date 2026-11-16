@@ -3,6 +3,7 @@ import { saveSensitivity, loadSensitivity } from '/core/calibration.js';
 import { AudioEngine } from '/core/audio.js';
 import { GameLink } from '/core/net.js';
 import { clamp } from '/core/orientation.js';
+import { icon } from '/core/icons.js';
 
 /**
  * The SenWii menu.
@@ -16,16 +17,8 @@ import { clamp } from '/core/orientation.js';
 
 const $ = (id) => document.getElementById(id);
 
-const ICONS = {
-  racing: 'i-kart',
-  'fruit-ninja': 'i-blade',
-  'alien-attack': 'i-invader',
-  'shooting-range': 'i-target',
-  bowling: 'i-pin',
-  boxing: 'i-glove',
-  'air-hockey': 'i-puck',
-};
-const iconFor = (slug) => ICONS[slug] || 'i-joy';
+// Each game names its icon in game.json; the glyphs live in core/icons.js.
+const iconName = (game) => game.icon || 'gamepad';
 
 let games = [];
 
@@ -191,7 +184,7 @@ function renderGames() {
     el.tabIndex = 0;
     el.dataset.slug = game.slug;
     el.innerHTML = `<span class="cart-led"></span>`
-      + `<span class="cart-plate"><svg class="icon"><use href="#${iconFor(game.slug)}"/></svg></span>`
+      + `<span class="cart-plate">${icon(iconName(game), 'icon')}</span>`
       + `<div class="cart-copy"><h3>${game.title}</h3><p>${game.tagline || ''}</p></div>`
       + `<span class="cart-players">${game.players === 1 ? '1 PLAYER' : `${game.players || 1} PLAYERS`}</span>`;
     el.addEventListener('click', (e) => {
@@ -217,14 +210,14 @@ function launch(game, el) {
   const banner = document.createElement('div');
   banner.id = 'launch';
   banner.style.cssText = `left:${r.left}px; top:${r.top}px; width:${r.width}px; height:${r.height}px;`;
-  banner.innerHTML = `<div class="l-emoji">${game.emoji || '\u{1F3AE}'}</div><div class="l-title">${game.title}</div>`;
+  banner.innerHTML = `<div class="l-icon">${icon(iconName(game), 'icon')}</div><div class="l-title">${game.title}</div>`;
   document.body.appendChild(banner);
   void banner.offsetWidth;
   banner.classList.add('full');
 
   try {
     sessionStorage.setItem('senwii.launch', JSON.stringify({
-      slug: game.slug, title: game.title, emoji: game.emoji || '\u{1F3AE}', c0, c1, t: Date.now(),
+      slug: game.slug, title: game.title, icon: iconName(game), c0, c1, t: Date.now(),
       room: link.room,
     }));
   } catch { /* storage may be unavailable; the splash just won't carry over */ }

@@ -7,9 +7,9 @@ import { axesFromSample } from '../../core/orientation.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { Vision } from './vision.js';
 import { DanceMusic } from './music.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 import {
-  SONGS, songById, DanceSession, WINDOWS, MOVES,
-  loadDanceSave, persistDanceSave, gradePassed,
+  SONGS, DanceSession, MOVES, loadDanceSave, persistDanceSave,
 } from './logic.js';
 
 /**
@@ -45,12 +45,13 @@ let raised = false;
 let lastRaiseAt = 0;
 
 function onMove(moveId, now) {
-  if (!session) return;
-  session.perform(moveId, now);
+  if (!session || session.state !== 'playing') return;
+  session.perform(moveId, clock.at(now));
 }
 
 const channel = createChannel({
   room: launchData?.room,
+  deskKeys: false,          // ←/→/D are dance moves here, not sensitivity/debug
   onA: () => {
     if (!session || session.state === 'ready' || session.state === 'finished') startDance();
   },
@@ -93,34 +94,123 @@ const channel = createChannel({
 const { audio } = channel;
 const music = new DanceMusic(audio);
 
+/**
+ * Song clock — one time base for the chart *and* the beat.
+ *
+ * With a running AudioContext the chart reads the audio clock (the music is
+ * scheduled on it), corrected for output latency. AudioEngine suspends the
+ * context while the tab is hidden, which freezes this clock too, so a tab
+ * switch pauses the song instead of knocking the music out of phase and
+ * bursting misses. Without audio it falls back to performance.now() and
+ * pauses itself while hidden. Returns ms since song start; inputs carry
+ * performance.now() stamps and are converted with at().
+ */
+const clock = {
+  mode: 'perf',
+  last: 0,
+  perfStart: 0,
+  paused: 0,
+  hiddenAt: 0,
+  start() {
+    const c = audio.ctx;
+    if (c && c.state === 'running' && music.startTime != null) {
+      this.mode = 'audio';
+    } else {
+      this.mode = 'perf';
+      this.perfStart = performance.now();
+      this.paused = 0;
+      this.hiddenAt = document.hidden ? performance.now() : 0;
+    }
+    this.last = -Infinity;
+    this.last = this.tick();
+  },
+  /** Song ms at a performance.now() timestamp (not clamped). */
+  at(perfT) {
+    if (this.mode === 'audio') {
+      const c = audio.ctx;
+      if (!c || c.state !== 'running') return this.last;     // suspended: frozen
+      const pnow = performance.now();
+      let ctxT;
+      const ts = typeof c.getOutputTimestamp === 'function' ? c.getOutputTimestamp() : null;
+      if (ts && ts.performanceTime > 0 && ts.contextTime > 0 && pnow - ts.performanceTime < 500) {
+        ctxT = ts.contextTime + (perfT - ts.performanceTime) / 1000;   // latency-exact
+      } else {
+        ctxT = c.currentTime - (c.outputLatency || c.baseLatency || 0) + (perfT - pnow) / 1000;
+      }
+      return (ctxT - music.startTime) * 1000;
+    }
+    if (this.hiddenAt) return this.last;
+    return perfT - this.perfStart - this.paused;
+  },
+  /** Advance the frame clock; never runs backwards. */
+  tick() {
+    const t = this.at(performance.now());
+    if (t > this.last) this.last = t;
+    return this.last;
+  },
+};
+document.addEventListener('visibilitychange', () => {
+  if (clock.mode !== 'perf') return;
+  const now = performance.now();
+  if (document.hidden) { if (!clock.hiddenAt) clock.hiddenAt = now; }
+  else if (clock.hiddenAt) { clock.paused += now - clock.hiddenAt; clock.hiddenAt = 0; }
+});
+
 audio.register('dance-perfect', () => DanceMusic.perfect(audio));
 audio.register('dance-good', () => DanceMusic.good(audio));
 audio.register('dance-miss', () => DanceMusic.miss(audio));
 
 // ── Vision ─────────────────────────────────────────────────────────────────
 
+const CAM_LABELS = {
+  waiting: 'waiting for camera…',
+  off: 'off — starts on play',
+  denied: 'blocked — phone only',
+  none: 'no camera — phone only',
+  busy: 'camera busy — phone only',
+  insecure: 'needs HTTPS — phone only',
+  unavailable: 'unsupported — phone only',
+  error: 'unavailable — phone only',
+  timeout: 'no answer — phone only',
+};
+// Outcomes that won't change by asking again: stop retrying, go phone-only.
+const CAM_FINAL = new Set(['denied', 'none', 'insecure', 'unavailable']);
+
+function setCamStatus(s) {
+  const cam = $('camstatus');
+  if (!cam) return;
+  cam.textContent = s.camera === 'on'
+    ? (s.face === 'on' ? 'on + face' : 'on (motion)')
+    : CAM_LABELS[s.camera] || 'phone only';
+}
+
 const vision = new Vision({
   onMove: (moveId, now) => onMove(moveId, now),
   onStatus: (s) => {
-    const cam = $('camstatus');
-    if (cam) {
-      cam.textContent = s.camera === 'on'
-        ? (s.face === 'on' ? 'on + face' : 'on (motion)')
-        : s.camera === 'denied' ? 'denied — phone only' : 'off';
-    }
+    if (CAM_FINAL.has(s.camera)) phoneOnly = true;
+    $('camwrap').classList.toggle('off', s.camera !== 'on');
+    setCamStatus(s);
   },
 });
 
+const CAMERA_TIMEOUT_MS = 10000;
+
 async function ensureCamera() {
-  // Try once per session start; if denied/unavailable, fall back to phone-only.
   if (vision.enabled) return true;
   if (phoneOnly) return false;
-  const ok = await vision.start($('cam'));
-  $('camwrap').classList.toggle('off', !ok);
-  if (!ok) {
-    phoneOnly = true;
-  }
-  return ok;
+  // The HUD is under the overlay here, so say it on the panel itself.
+  const cta = document.querySelector('#panel .cta');
+  const ctaHtml = cta ? cta.innerHTML : '';
+  if (cta) cta.textContent = 'Waiting for camera… allow access in the browser prompt (or wait — phone-only in 10s)';
+  let timer = 0;
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), CAMERA_TIMEOUT_MS); });
+  // Unanswered prompt: play phone-only now. The start stays pending, so a
+  // late "Allow" turns the camera on for the next song.
+  const res = await Promise.race([vision.start($('cam')), timeout]);
+  clearTimeout(timer);
+  if (cta) cta.innerHTML = ctaHtml;
+  if (res === 'timeout') setCamStatus({ camera: 'timeout' });
+  return res === true;
 }
 
 // ── UI: song select ────────────────────────────────────────────────────────
@@ -134,7 +224,7 @@ function syncSongs() {
     const best = save.best[s.id];
     const card = document.createElement('div');
     card.className = `song${i === songIndex ? ' sel' : ''}${unlocked ? '' : ' locked'}`;
-    card.innerHTML = `<div class="se">${unlocked ? s.emoji : '🔒'}</div>
+    card.innerHTML = `<div class="se">${icon(unlocked ? s.icon : 'lock')}</div>
       <div class="sn">${s.name}</div>
       <div class="sm">${unlocked ? `${s.bpm} BPM · ${best ? `${best.grade} ${best.score}` : s.desc}` : 'clear previous to unlock'}</div>`;
     wrap.appendChild(card);
@@ -157,27 +247,42 @@ function changeSong(delta) {
 let judgeUntil = 0;
 let promptUntil = 0;
 
-async function startDance() {
-  if (songIndex >= save.unlocked) return;
-  audio.unlock();
-  await ensureCamera();
-  const song = SONGS[songIndex];
-  // phoneOnly is true if camera couldn't start; also respect if vision never enabled.
-  const po = !vision.enabled;
-  phoneOnly = po;
+let starting = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  session = new DanceSession({
-    song,
-    seed: (performance.now() * 997) | 0,
-    phoneOnly: po,
-    onEvent: handleEvent,
-  });
-  music.setBpm(song.bpm);
-  session.start(performance.now());
-  music.start();
-  $('overlay').classList.add('hide');
-  $('songtag').textContent = `${song.emoji} ${song.name}`;
-  showPrompt(po ? 'phone moves only — camera off' : 'match the moves!', 1800);
+async function startDance() {
+  // Space/click/phone A can all land while the camera prompt is up; only
+  // one start may be in flight (two used to open two camera streams).
+  if (starting || (session && session.state === 'playing')) return;
+  if (songIndex >= save.unlocked) return;
+  starting = true;
+  try {
+    const unlocking = audio.unlock().catch(() => false);   // inside the gesture
+    await ensureCamera();
+    // Give resume() a moment; a context that never runs (no gesture) → perf clock.
+    await Promise.race([unlocking, sleep(500)]);
+    const song = SONGS[songIndex];
+    const po = !vision.enabled;
+
+    session = new DanceSession({
+      song,
+      seed: (performance.now() * 997) | 0,
+      phoneOnly: po,
+      onEvent: handleEvent,
+    });
+    music.stop();
+    music.setBpm(song.bpm);
+    // Only play the beat if it can share the chart's clock; music scheduled
+    // on a context that wakes up later would be out of phase.
+    if (audio.ctx && audio.ctx.state === 'running') music.start();
+    clock.start();
+    session.start(0);
+    $('overlay').classList.add('hide');
+    $('songtag').innerHTML = `${icon(song.icon)} ${song.name}`;
+    showPrompt(po ? 'phone moves only — camera off' : 'match the moves!', 1800);
+  } finally {
+    starting = false;
+  }
 }
 
 function handleEvent(e) {
@@ -191,14 +296,19 @@ function handleEvent(e) {
     audio.play('dance-miss');
   } else if (e.type === 'finish') {
     music.stop();
+    // Back on the menu: release the camera (light off). It restarts on the
+    // next song without a new prompt once permission is granted.
+    // (A still-pending permission prompt is left alone so a late Allow counts.)
+    if (vision.enabled) vision.stop();
     const song = session.song;
     const prev = save.best[song.id];
     if (!prev || e.score > prev.score) save.best[song.id] = { score: e.score, grade: e.grade };
+    const before = save.unlocked;
     if (e.passed && song.order + 1 >= save.unlocked) {
       save.unlocked = Math.min(SONGS.length, song.order + 2);
     }
     persistDanceSave(save);
-    showResults(e);
+    showResults(e, save.unlocked > before);
   }
 }
 
@@ -216,11 +326,11 @@ function showPrompt(text, ms) {
   promptUntil = performance.now() + ms;
 }
 
-function showResults(e) {
+function showResults(e, newlyUnlocked) {
   const song = session.song;
-  const unlocked = e.passed && song.order + 1 < SONGS.length && save.unlocked > song.order + 1;
+  const unlocked = newlyUnlocked && song.order + 1 < SONGS.length;
   const accPct = Math.round(e.acc * 100);
-  $('panel').innerHTML = `<h1>💃 <em>${e.passed ? 'Cleared!' : 'Keep grooving'}</em></h1>
+  $('panel').innerHTML = `<h1>${icon('music')} <em>${e.passed ? 'Cleared!' : 'Keep grooving'}</em></h1>
     <div class="grade" style="color:${e.passed ? '#ffe36e' : '#9aa7bd'}">${e.grade}</div>
     <div class="results">
       <div>Score &nbsp;&nbsp; <b>${e.score}</b></div>
@@ -247,6 +357,23 @@ const MOVE_COLORS = {
   'phone-raise': '#c7a6ff',
 };
 
+// Move icons drawn on the canvas: the shared SVG glyphs rasterised once each.
+const NOTE_INK = '#0b0816';
+const iconImages = new Map();
+function iconImage(name) {
+  let img = iconImages.get(name);
+  if (!img) {
+    const inner = icon(name).replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="64" height="64" color="${NOTE_INK}" `
+      + `fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+    img = new Image();
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    iconImages.set(name, img);
+  }
+  return img;
+}
+Object.values(MOVES).forEach((m) => iconImage(m.icon));
+
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = window.innerWidth; const h = window.innerHeight;
@@ -259,7 +386,7 @@ function resize() {
 window.addEventListener('resize', resize);
 
 function roundRect(x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
   ctx.arcTo(x + w, y, x + w, y + h, rr);
@@ -373,10 +500,11 @@ function draw(now) {
     ctx.strokeStyle = '#ffffffcc'; ctx.lineWidth = 2; ctx.stroke();
     // icon
     ctx.globalAlpha = n.hit ? 0.5 : 1;
-    ctx.font = `${n.hit ? 18 : 22}px system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#0b0816';
-    ctx.fillText(n.icon, x, y + 1);
+    const img = iconImage(n.icon);
+    if (img.complete && img.naturalWidth) {
+      const sz = n.hit ? 22 : 28;
+      ctx.drawImage(img, x - sz / 2, y - sz / 2, sz, sz);
+    }
     ctx.restore();
 
     // label near the hit line for upcoming notes
@@ -392,7 +520,8 @@ function draw(now) {
   }
 
   // progress bar
-  const prog = Math.min(1, session.nowMs / Math.max(1, session.durationMs));
+  // Song time starts slightly negative (music lead-in), so clamp both ends.
+  const prog = Math.max(0, Math.min(1, session.nowMs / Math.max(1, session.durationMs)));
   ctx.save();
   ctx.fillStyle = '#ffffff22';
   roundRect(w * 0.25, 14, w * 0.5, 6, 3); ctx.fill();
@@ -403,12 +532,17 @@ function draw(now) {
   // HUD text
   $('score').textContent = String(session.score);
   $('combo').textContent = `combo ${session.combo} · x${session.mult}`;
-  const ps = $('phonestatus');
-  if (ps) ps.textContent = channel.pointer.live ? 'connected' : 'not connected';
 }
 
 function update(now) {
-  if (session && session.state === 'playing') session.update(now);
+  // Expire pointer.live after 500ms of silence (and keep the mouse fallback).
+  channel.poll(now);
+  const ps = $('phonestatus');
+  if (ps) {
+    const txt = channel.pointer.live ? 'connected' : (channel.pointer.lastSeen ? 'not connected' : 'waiting');
+    if (ps.textContent !== txt) ps.textContent = txt;
+  }
+  if (session && session.state === 'playing') session.update(clock.tick());
   if (judgeUntil && now > judgeUntil) { $('judge').classList.remove('on'); judgeUntil = 0; }
   if (promptUntil && now > promptUntil) { $('prompt').classList.remove('on'); promptUntil = 0; }
 }
@@ -435,14 +569,12 @@ window.addEventListener('keydown', (e) => {
     if (k === 'k') { onMove('phone-swing', now); }
     if (k === 'l') { onMove('phone-raise', now); }
   }
-  if (e.key === ' ' || e.key === 'Enter') {
-    e.preventDefault();
-    if (!session || session.state === 'ready' || session.state === 'finished') startDance();
-  }
+  // Space/Enter start is handled once, by the channel's onA.
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
+hydrateIcons();
 syncSongs();
 resize();
 $('phonestatus').textContent = 'waiting';

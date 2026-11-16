@@ -23,20 +23,44 @@ import { stepBall, groundBall } from '../shared/ball.js';
 export const LANE = { LENGTH: 18, HALF_WIDTH: 0.53 };
 export const PIN_RADIUS = 0.06;
 export const BALL_RADIUS = 0.13;
-export const CHAIN_RADIUS = 0.33;     // a felled pin can topple a neighbour this close
+export const CHAIN_REACH = 0.62;      // a flying pin can reach a neighbour this far away
+export const TOPPLE_IMPULSE = 1.6;    // impulse (m/s-ish) needed to knock a pin over
+export const PIN_CARRY = 0.56;        // share of a pin's momentum passed down a chain link
 export const HEADPIN_Z = LANE.LENGTH - 2.2;
 export const ROW_STEP = 0.305;        // depth between pin rows
 export const FRAMES = 10;
+export const HOOK_ACCEL = 1.1;        // m/s² of side force per unit spin at full grip
 
 // Three oil patterns — "levels". House hooks easily (forgiving), sport rewards
 // a clean read, challenge is slick and punishes a lazy release.
 export const PATTERNS = [
-  { id: 'house', name: 'House', emoji: '🏠', hookMult: 1.25, friction: 0.38, desc: 'Friendly oil — the ball grips and hooks easily.', unlockAt: 0 },
-  { id: 'sport', name: 'Sport', emoji: '🎯', hookMult: 0.9, friction: 0.3, desc: 'Flatter pattern — you earn the hook.', unlockAt: 80 },
-  { id: 'challenge', name: 'Challenge', emoji: '🔥', hookMult: 0.6, friction: 0.22, desc: 'Slick and tight — precision or the gutter.', unlockAt: 140 },
+  { id: 'house', name: 'House', icon: 'house', hookMult: 1.25, friction: 0.14, desc: 'Friendly oil — the ball grips and hooks easily.', unlockAt: 0 },
+  { id: 'sport', name: 'Sport', icon: 'target', hookMult: 0.9, friction: 0.11, desc: 'Flatter pattern — you earn the hook.', unlockAt: 80 },
+  { id: 'challenge', name: 'Challenge', icon: 'flame', hookMult: 0.6, friction: 0.08, desc: 'Slick and tight — precision or the gutter.', unlockAt: 140 },
 ];
 
 export const patternById = (id) => PATTERNS.find((p) => p.id === id) || PATTERNS[0];
+
+/**
+ * Where a delivery would go: a ghost roll of the real physics, sampled from
+ * the foul line to just short of the headpin. Feeds the renderer's preview
+ * arc so the line it draws is the line the ball takes.
+ */
+export function previewPath(pattern, aimOffset, spin = 0, power = 0.7, every = 4) {
+  const g = new Game({ pattern });
+  g.pins = [];                                   // a clear lane: path only
+  g.roll(power, aimOffset, spin);
+  const pts = [{ x: 0, z: 0 }];
+  for (let i = 1; i < 2000 && g.state === 'roll'; i += 1) {
+    g.update(0, 0.016);
+    if (g.state !== 'roll' || g.ball.z > HEADPIN_Z - 0.3 || Math.abs(g.ball.x) > LANE.HALF_WIDTH) {
+      pts.push({ x: g.ball.x, z: g.ball.z });
+      break;
+    }
+    if (i % every === 0) pts.push({ x: g.ball.x, z: g.ball.z });
+  }
+  return pts;
+}
 
 /** The standard 1-2-3-4 triangle, apex (headpin) toward the bowler. */
 export function standardPins() {
@@ -199,8 +223,10 @@ export class Game {
    */
   roll(power, aimOffset = this.aimOffset, spin = 0) {
     if (this.state !== 'aim') return null;
-    const p = Math.max(0.12, Math.min(1, power));
-    const s = Math.max(-1, Math.min(1, spin));
+    // Inputs come straight off a phone's sensors: sanitize, never trust.
+    const p = Number.isFinite(power) ? Math.max(0.12, Math.min(1, power)) : 0.5;
+    const s = Number.isFinite(spin) ? Math.max(-1, Math.min(1, spin)) : 0;
+    if (!Number.isFinite(aimOffset)) aimOffset = 0;
     const speed = 6 + p * 9;
     this.ball = {
       x: 0, y: 0, z: 0,
@@ -217,35 +243,42 @@ export class Game {
   }
 
   /**
-   * Strike a pin: mark it down for scoring immediately, record the impact for
-   * the renderer, and carry momentum into neighbours (a chain reaction). The
-   * impulse comes from the ball or the pin that hit this one.
+   * Strike a pin with impulse (impulseX, impulseZ). Too soft and it only
+   * wobbles; otherwise it goes down (scored immediately), the impact is
+   * recorded for the renderer, and the pin flies on, carrying part of its
+   * momentum into the neighbours it is heading toward. Each link of the
+   * chain passes on less (PIN_CARRY × alignment × distance falloff), so a
+   * weak or glancing hit dies out after a pin or two while a pocket hit with
+   * pace carries through the rack.
    */
   knockPin(pin, impulseX = 0, impulseZ = 0, depth = 0) {
     if (!pin.standing) return;
+    const mag = Math.hypot(impulseX, impulseZ);
+    if (!(mag >= TOPPLE_IMPULSE)) return;      // also rejects NaN
     pin.standing = false;
-    // Topple away from the impact: fall axis is perpendicular to the impulse.
-    const mag = Math.hypot(impulseX, impulseZ) || 1;
     pin.vx = impulseX;
     pin.vz = impulseZ;
     pin.impact = mag;
+    // Topple away from the impact: the renderer tips it along this heading.
     pin.fallAxis = Math.atan2(impulseZ, impulseX);
-    // sign: +1 falls "with" the impulse
     pin.fallDir = 1;
     this.onEvent({ type: 'pin-down', id: pin.id, impulse: mag });
-    if (depth > 3) return;              // safety cap on cascades
+    if (depth > 8) return;              // safety cap; decay ends chains long before
+    const ux = impulseX / mag;
+    const uz = impulseZ / mag;
     for (const other of this.pins) {
       if (!other.standing) continue;
       const dx = other.x - pin.x;
       const dz = other.z - pin.z;
       const d = Math.hypot(dx, dz);
-      if (d < CHAIN_RADIUS && d > 1e-6) {
-        // Carry a fraction of the impulse forward, biased along the contact.
-        const nx = dx / d;
-        const nz = dz / d;
-        const carry = mag * 0.55;
-        this.knockPin(other, nx * carry + impulseX * 0.15, nz * carry + impulseZ * 0.15, depth + 1);
-      }
+      if (d >= CHAIN_REACH || d < 1e-6) continue;
+      const nx = dx / d;
+      const nz = dz / d;
+      const align = nx * ux + nz * uz;  // is the flying pin headed that way?
+      if (align <= 0.25) continue;
+      const transfer = mag * PIN_CARRY * align * (1 - (d / CHAIN_REACH) ** 2);
+      // Contact pushes along the line of centres, plus a little carry-through.
+      this.knockPin(other, (nx * 0.75 + ux * 0.25) * transfer, (nz * 0.75 + uz * 0.25) * transfer, depth + 1);
     }
   }
 
@@ -268,7 +301,7 @@ export class Game {
     if (Math.abs(b.x) <= LANE.HALF_WIDTH && b.z < HEADPIN_Z - 0.4) {
       const speed = Math.hypot(b.vx, b.vz);
       const grip = 0.35 + 0.65 * Math.max(0, 1 - speed / 15);  // more bite as it slows
-      const hook = b.spin * pat.hookMult * grip * 3.2;
+      const hook = b.spin * pat.hookMult * grip * HOOK_ACCEL;
       b.vx += hook * dt;
       b.spin *= Math.max(0, 1 - 0.35 * dt);
     }
@@ -282,10 +315,17 @@ export class Game {
           const dz = pin.z - b.z;
           const d = Math.hypot(dx, dz) || 1;
           const sp = Math.hypot(b.vx, b.vz);
-          this.knockPin(pin, (dx / d) * sp * 0.6 + b.vx * 0.25, (dz / d) * sp * 0.6 + b.vz * 0.25);
-          // The ball loses a little energy through the rack.
-          b.vx *= 0.94;
-          b.vz *= 0.94;
+          // A 7kg ball into a 1.5kg pin: the pin leaves faster than the ball
+          // arrived, mostly along the line of centres.
+          const ix = (dx / d) * sp * 1.1 + b.vx * 0.3;
+          const iz = (dz / d) * sp * 1.1 + b.vz * 0.3;
+          // Even a crawling ball tips a pin it leans on.
+          const m = Math.hypot(ix, iz) || 1;
+          const k = Math.max(1, (TOPPLE_IMPULSE * 1.05) / m);
+          this.knockPin(pin, ix * k, iz * k);
+          // The ball loses a little pace and deflects off the pin.
+          b.vx = b.vx * 0.93 - (dx / d) * sp * 0.06;
+          b.vz *= 0.93;
         }
       }
     }
@@ -304,7 +344,15 @@ export class Game {
     const standing = this.standingCount();
     const knocked = this.standingAtRollStart - standing;
     this.rolls.push(knocked);
-    this.onEvent({ type: 'settled', pinsDown: knocked, standing, score: this.score() });
+    // A strike clears a full rack with one ball; a spare clears what was left
+    // of one. This holds in every frame, the 10th's bonus balls included.
+    const fullRack = this.standingAtRollStart === 10;
+    const strike = fullRack && standing === 0;
+    const spare = !fullRack && standing === 0 && this.standingAtRollStart > 0;
+    this.onEvent({
+      type: 'settled', pinsDown: knocked, standing, score: this.score(),
+      strike, spare, frame: this.frameIndex, ball: this.ballInFrame + 1,
+    });
     this.planAdvance(knocked);
   }
 
@@ -329,11 +377,10 @@ export class Game {
     }
     if (this.ballInFrame === 2) {
       const first = this.rolls[this.rolls.length - 2];
-      if (first === 10 || first + knocked === 10) {
-        this.beginSweep('reset', { endFrame: false });
-      } else {
-        this.gameOver();
-      }
+      if (first === 10 && knocked === 10) this.beginSweep('reset', { endFrame: false });  // X X → fresh rack
+      else if (first === 10) this.beginSweep('clear', { endFrame: false });              // X 7 → bonus at the 3 left
+      else if (first + knocked === 10) this.beginSweep('reset', { endFrame: false });     // spare → fresh rack
+      else this.gameOver();
       return;
     }
     this.gameOver();
@@ -361,6 +408,7 @@ export class Game {
     if (this.pendingEndFrame) {
       this.endFrame();
     } else {
+      this.resetBall();
       this.state = 'aim';
     }
   }
@@ -370,8 +418,14 @@ export class Game {
     this.ballInFrame = 0;
     if (this.frameIndex >= FRAMES) { this.gameOver(); return; }
     this.pins = standardPins();
+    this.resetBall();
     this.state = 'aim';
     this.onEvent({ type: 'frame', frame: this.frameIndex, score: this.score() });
+  }
+
+  /** Back on the approach for the next delivery. */
+  resetBall() {
+    this.ball = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, spin: 0 };
   }
 
   gameOver() {

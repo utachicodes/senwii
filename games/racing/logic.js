@@ -49,6 +49,7 @@ export const STEER_INPUT_MAX = 30;  // accepted input range (deg of bank)
 export const OFFROAD_RESCUE_MS = 4000; // stuck off the road this long → rescue
 
 const TAU = Math.PI * 2;
+const DEG = Math.PI / 180;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const clamp1 = (v) => clamp(v, -1, 1);
 
@@ -88,7 +89,7 @@ export const TRACKS = [
   {
     slug: 'sunset-speedway',
     name: 'Sunset Speedway',
-    emoji: '🌇',
+    icon: 'sunset',
     laps: 3,
     halfWidth: 11,
     order: 0,
@@ -110,7 +111,7 @@ export const TRACKS = [
   {
     slug: 'neon-circuit',
     name: 'Neon Circuit',
-    emoji: '🌃',
+    icon: 'city',
     laps: 3,
     halfWidth: 9,
     order: 1,
@@ -132,7 +133,7 @@ export const TRACKS = [
   {
     slug: 'canyon-rush',
     name: 'Canyon Rush',
-    emoji: '🏜️',
+    icon: 'dunes',
     laps: 3,
     halfWidth: 10,
     order: 2,
@@ -259,7 +260,10 @@ export function sAtT(track, t) {
   return cum[i] + (cum[i + 1] - cum[i]) * f;
 }
 
-/** Signed curvature, 1/m. Positive = the road bends left. */
+/**
+ * Signed curvature, 1/m: d(heading)/ds. A larger heading is a right turn
+ * (see stepPlayer), so positive = the road bends right.
+ */
 export function trackCurvature(track, t) {
   const e = 1 / 1024;
   const a0 = trackHeading(track, t - e);
@@ -371,6 +375,8 @@ export class Race {
     this.finishedMs = null;
     this.rank = RACER_COUNT;
     this.recording = [];
+    this.bestRecording = null;       // ghost keys of the best completed lap
+    this.preStart = true;            // still on the grid side of the line (lap 1)
     this.lastKeyMs = -Infinity;
 
     // CPU grid: player starts 6th, rivals ahead — the comeback is the game.
@@ -429,6 +435,8 @@ export class Race {
     this.lapTimes = [];
     this.finishedMs = null;
     this.recording = [];
+    this.bestRecording = null;
+    this.preStart = true;
     this.lastKeyMs = -Infinity;
     this.driftCharge = 0;
     this.drifting = false;
@@ -493,6 +501,9 @@ export class Race {
 
     if (racing) {
       this.checkProgress(now);
+      // After the lap counter has had its say, so crossing the line is one
+      // continuous step (never a frame a lap short or a lap ahead).
+      this.updateProgress();
       this.recordGhost();
       this.updateRank();
       if (this.finishedMs !== null) this.finish();
@@ -555,7 +566,7 @@ export class Race {
     // Steering: authority grows with speed; drifting carves harder.
     const authority = Math.min(1, this.speed / 10);
     const turn = TURN_RATE * (this.drifting ? DRIFT_TURN_MULT : 1);
-    this.heading = wrapAngle(this.heading + this.steer * turn * authority * dt);
+    this.heading = wrapAngle(this.heading + this.steer * turn * authority * dt * DEG);
 
     // Velocity direction relaxes toward the heading — the drift is the lag.
     const grip = (this.drifting ? DRIFT_GRIP : 1) * (this.onTrack ? GRIP : GRASS_GRIP);
@@ -580,10 +591,7 @@ export class Race {
       }
     }
 
-    // Progress in metres from the line.
-    let s = sAtT(this.track, this.trackT);
-    if (this.lap === 1 && tDiff(this.trackT, 0) < 0) s -= trackLengthM(this.track);
-    this.progressM = (this.lap - 1) * trackLengthM(this.track) + s;
+    this.updateProgress();
 
     // Boost pads on the road.
     if (now > this.padCooldown) {
@@ -612,6 +620,22 @@ export class Race {
       this.speed *= Math.max(0, 1 - WALL_SCRUB * dt);
       this.scraping = true;
     }
+  }
+
+  /**
+   * Progress in metres from the line. Before the first crossing the grid
+   * sits just behind it (t ≈ 1), so that stretch counts as negative; once
+   * past the line, t ∈ (0.5, 1) is simply the back half of the lap.
+   */
+  updateProgress() {
+    const L = trackLengthM(this.track);
+    let s = sAtT(this.track, this.trackT);
+    if (this.preStart) {
+      if (tDiff(this.trackT, 0) < 0) s -= L;
+      else this.preStart = false;
+    }
+    // Laps actually closed, not this.lap: the last lap never bumps the counter.
+    this.progressM = this.lapTimes.length * L + s;
   }
 
   stepKart(k, now, dt, racing) {
@@ -696,8 +720,15 @@ export class Race {
   /** Checkpoints in order, then the line closes the lap. */
   checkProgress(now) {
     const near = nearestOnTrack(this.track, this.pos.x, this.pos.z);
+    // Kart separation may have nudged us since stepPlayer; progress and the
+    // lap counter must agree on which side of the line we are.
+    this.trackT = near.t;
     const cpT = (this.nextCp % CHECKPOINT_COUNT) / CHECKPOINT_COUNT;
-    if (Math.abs(tDiff(near.t, cpT)) < 0.045 && near.dist < this.track.halfWidth * 2.4) {
+    const d = tDiff(near.t, cpT);
+    // Mid-lap checkpoints are a window around the spot; the line itself only
+    // counts once the kart is actually across it, not 40 m short.
+    const inWindow = this.nextCp < CHECKPOINT_COUNT ? Math.abs(d) < 0.045 : d >= 0 && d < 0.045;
+    if (inWindow && near.dist < this.track.halfWidth * 2.4) {
       if (this.nextCp < CHECKPOINT_COUNT) {
         this.nextCp += 1;
       } else {
@@ -713,7 +744,10 @@ export class Race {
     this.lapTimes.push(ms);
     this.recording.push({ ms, x: this.pos.x, z: this.pos.z, h: this.heading });
     const isBest = this.bestLapMs === null || ms < this.bestLapMs;
-    if (isBest) this.bestLapMs = ms;
+    if (isBest) {
+      this.bestLapMs = ms;
+      this.bestRecording = this.recording.slice();
+    }
     this.onEvent({ type: 'lap', lap: this.lap, ms, best: isBest });
     if (this.lap >= this.laps) {
       this.finishedMs = now;

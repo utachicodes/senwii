@@ -89,7 +89,9 @@
     background: #ffffff10; border: 2px solid #ffffff1c; color: #eef1f6;
   }
   .pat.sel { border-color: #5b8cff; background: #5b8cff1c; }
-  .pat .pe { font-size: 30px; }
+  .pat .pe { font-size: 30px; line-height: 1; height: 34px; display: grid; place-items: center; }
+  .panel h1 .ico { color: #f4f1ea; }
+  #patternTag .ico { vertical-align: -0.18em; }
   .pat .pn { font-weight: 800; font-size: 15px; margin-top: 2px; }
   .pat .pd { font-size: 11px; color: #9aa7bd; margin-top: 2px; }
   .pat.locked { opacity: .38; filter: grayscale(.7); }
@@ -111,20 +113,20 @@
   <div id="banner"></div>
   <div id="powerwrap"><div id="power"></div></div>
   <div id="hookhint">curve your hand at release to hook the ball</div>
-  <div id="keys"><a href="/">← Games</a> · aim with the pointer · <b>swing</b> to bowl · curve the release to hook ·
-    <b>A</b>/Space start · <b>↑↓</b> lane · <b>D</b> debug</div>
+  <div id="keys"><a href="/">← Games</a> · aim with the pointer · <b>swing</b> to bowl, curve it to hook ·
+    or <b>hold</b> Space/click &amp; release · <b>D</b> debug</div>
   <div id="link"><span class="dot" id="dot"></span><span id="link-t">no remote connected</span></div>
   <pre id="debug"></pre>
 </div>
 
 <div id="overlay">
   <div class="panel" id="panel">
-    <h1>🎳 <em>Bowling</em></h1>
+    <h1><i data-icon="pin"></i> <em>Bowling</em></h1>
     <p>Aim with the pointer, then <b>swing your hand</b> to bowl — swing speed
        sets power, and a twist at release puts hook on the ball. Read the oil,
        pick your line, and chase 300.</p>
     <div id="patterns"></div>
-    <div class="cta"><strong>A</strong> or <strong>Space</strong> to bowl · <strong>↑↓</strong> pick lane · <strong>B</strong> menu</div>
+    <div class="cta"><strong>A</strong> or <strong>Space</strong> to start · <strong>↑↓</strong> pick lane · <strong>B</strong> menu</div>
   </div>
 </div>
 

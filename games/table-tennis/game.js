@@ -6,6 +6,7 @@ const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { SwingDetector } from '../../core/gesture.js';
 import { Rally, TABLE, PLAYER_Z, AI_Z } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Table Tennis — renderer. The rally runs in logic.js; the pointer IS the
@@ -142,7 +143,7 @@ function handleEvent(e) {
       break;
     case 'over': {
       const won = e.winner === 'player';
-      $('panel').innerHTML = `<h1>${won ? '🏆 <em>Game!</em>' : '🏓 <em>Game lost</em>'}</h1>
+      $('panel').innerHTML = `<h1>${won ? `${icon('trophy')} <em>Game!</em>` : `${icon('paddle')} <em>Game lost</em>`}</h1>
         <p>${won ? `Longest rally: ${rally.longestRally} hits.` : 'Meet the ball with the paddle — position first, pace second.'}</p>
         <div class="cta"><strong>A</strong> rematch · <strong>B</strong> menu</div>`;
       $('overlay').classList.remove('hide');
@@ -217,3 +218,5 @@ window.__senwii = {
   rally, channel, pointer: channel.pointer, scene, camera, renderer, step, startGame,
   fps: () => fps,
 };
+
+hydrateIcons();

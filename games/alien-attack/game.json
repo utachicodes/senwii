@@ -1,7 +1,7 @@
 {
   "title": "Alien Attack",
-  "tagline": "Roll to fly. A to fire. Three lives.",
-  "emoji": "👾",
+  "tagline": "Roll to fly, A to fire. Ten sectors, two bosses.",
+  "icon": "invader",
   "players": 1,
   "order": 2
 }

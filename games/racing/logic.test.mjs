@@ -15,7 +15,7 @@ const TAU = Math.PI * 2;
 
 // A pure-pursuit autopilot: aims at a point ~28 m up the centreline. Good
 // enough to finish every circuit without touching a wall, deterministic.
-function drive(race, now, { lookahead = 28, gain = 45 } = {}) {
+function drive(race, now, { lookahead = 28, gain = 250 } = {}) {
   const tA = tAtS(race.track, race.progressM + lookahead);
   const c = trackCenterAt(race.track, tA);
   const want = Math.atan2(-(c.x - race.pos.x), -(c.z - race.pos.z));
@@ -23,6 +23,17 @@ function drive(race, now, { lookahead = 28, gain = 45 } = {}) {
   while (err > Math.PI) err -= TAU;
   while (err < -Math.PI) err += TAU;
   race.setSteer(Math.max(-30, Math.min(30, err * gain)));
+}
+
+/**
+ * Pin the kart's nose `angle` rad off the road direction toward the +normal
+ * (right-hand) wall, as a player holding it into the wall would.
+ */
+function noseIntoWall(race, angle = 0.6) {
+  const h = trackHeading(race.track, race.trackT) + angle;
+  race.heading = h;
+  race.motionHeading = h;
+  race.setSteer(0);
 }
 
 /** Step a race until `stopMs` on the sim clock or a predicate fires. */
@@ -199,8 +210,9 @@ test('accelerates on the road, capped off it', () => {
   race.speed = TOP_SPEED;
   // sail straight off the road: no steering correction, the cap must bite
   let sawOffTrack = false;
-  for (let i = 0; i < 120; i += 1) {
+  for (let i = 0; i < 200; i += 1) {
     now += DT * 1000;
+    noseIntoWall(race, Math.PI / 2);
     race.update(now, DT);
     sawOffTrack = sawOffTrack || !race.onTrack;
   }
@@ -235,7 +247,14 @@ test('drift: needs bank and speed, charges tiers, boosts on release', () => {
   race.setDrift(true, now);
   assert.equal(race.drifting, true);
   assert.ok(ev.some((e) => e.type === 'hop'));
-  now = run(race, { untilMs: now + (DRIFT_CHARGE_T3 + 0.4) * 1000, stop: (r) => r.driftTier === 3 });
+  // hold a steady bank through the drift (no autopilot: it would straighten
+  // out and drop the drift)
+  const driftEnd = now + (DRIFT_CHARGE_T3 + 0.4) * 1000;
+  while (now < driftEnd && race.driftTier < 3) {
+    now += DT * 1000;
+    race.setSteer(10);
+    race.update(now, DT);
+  }
   assert.equal(race.driftTier, 3, 'reached the top tier');
   const sparks = ev.filter((e) => e.type === 'spark').map((e) => e.tier);
   assert.deepEqual(sparks, [1, 2, 3], 'tiers fire in order');
@@ -274,12 +293,12 @@ test('walls: scraping scrubs speed but the kart keeps sliding, never pins', () =
   race.pos.x = c.x + n.x * (race.track.halfWidth + 6);
   race.pos.z = c.z + n.z * (race.track.halfWidth + 6);
   race.speed = TOP_SPEED;
-  // nose into the wall and hold it there: +steer presses the kart into the
-  // +normal side we parked it on. No autopilot — the wall must fight the kart.
-  race.setSteer(12);
+  // nose into the wall and hold it there: a right-hand angle presses the
+  // kart into the +normal side we parked it on. The wall must fight the kart.
   let scraped = false;
-  for (let i = 0; i < 240; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     now += DT * 1000;
+    noseIntoWall(race);
     race.update(now, DT);
     scraped = scraped || race.scraping;
   }
@@ -287,8 +306,9 @@ test('walls: scraping scrubs speed but the kart keeps sliding, never pins', () =
   // keep grinding: scrub bites, the kart keeps sliding, no pin
   const tBefore = race.trackT;
   const speedAtScrape = race.speed;
-  for (let i = 0; i < 180; i += 1) {
+  for (let i = 0; i < 150; i += 1) {
     now += DT * 1000;
+    noseIntoWall(race);
     race.update(now, DT);
   }
   assert.ok(race.speed < speedAtScrape - 3, `scrubbed (${race.speed.toFixed(1)})`);
@@ -314,12 +334,12 @@ test('off-road rescue after the grace period', () => {
   const n = trackNormal(race.track, race.trackT);
   race.pos.x = c.x + n.x * (race.track.halfWidth + 6);
   race.pos.z = c.z + n.z * (race.track.halfWidth + 6);
-  race.setSteer(20);
-  // steer straight into the wall, no correction, until the rescue fires
+  // hold it into the wall, no correction, until the rescue fires
   const beachAt = now;
   let rescuedAt = null;
   for (let i = 0; i < (OFFROAD_RESCUE_MS + 3000) / (DT * 1000); i += 1) {
     now += DT * 1000;
+    noseIntoWall(race);
     race.update(now, DT);
     if (ev.includes('rescue')) { rescuedAt = now; break; }
   }
@@ -373,6 +393,70 @@ test('full race: autopilot finishes, points and laps line up', { timeout: 30_000
   assert.equal(race.nextCp, 1);
 });
 
+test('progress is continuous all race: no grid offset mid-lap, no early lap close', { timeout: 30_000 }, () => {
+  // Regressions: (a) lap-1 progress used to apply the grid's −1 lap offset
+  // for any t in (0.5, 1), dropping ~860 m mid-lap; (b) the line checkpoint
+  // closed laps ~41 m short, so progress ran a lap too high until the line.
+  const race = new Race({ trackIndex: 0, seed: 7 });
+  const L = trackLengthM(race.track);
+  const laps = [];
+  race.onEvent = (e) => {
+    if (e.type === 'lap') laps.push({ t: race.trackT, lap: e.lap });
+  };
+  race.start(0);
+  let now = 0;
+  let prev = race.progressM;
+  let maxJump = 0;
+  let minProg = Infinity;
+  let sawBackHalf = false;
+  while (now < 240_000 && race.finishedMs === null) {
+    now += DT * 1000;
+    drive(race, now);
+    race.update(now, DT);
+    if (race.state !== 'racing' && race.state !== 'finished') continue;
+    maxJump = Math.max(maxJump, Math.abs(race.progressM - prev));
+    prev = race.progressM;
+    if (race.lap === 1 && race.progressM > L * 0.6) {
+      sawBackHalf = true;
+      minProg = Math.min(minProg, race.progressM);
+    }
+  }
+  assert.ok(race.finishedMs !== null, 'finished');
+  assert.ok(sawBackHalf, 'drove the back half of lap 1');
+  assert.ok(minProg > 0, 'lap-1 back half never counted as behind the line');
+  assert.ok(maxJump < 3, `progress never jumps (max step ${maxJump.toFixed(2)} m)`);
+  assert.equal(laps.length, race.laps);
+  for (const l of laps) {
+    const d = tDiff(l.t, 0);
+    assert.ok(d >= 0 && d < 0.01, `lap ${l.lap} closed past the line (t ${l.t.toFixed(4)})`);
+  }
+  // Finished just across the line: total progress is laps × L plus a hair.
+  assert.ok(Math.abs(race.progressM - race.laps * L) < 10,
+    `finish progress ${race.progressM.toFixed(1)} vs ${(race.laps * L).toFixed(1)}`);
+});
+
+test('ghost keeps the best lap, not the last one', () => {
+  const race = new Race({ trackIndex: 0, seed: 7 });
+  race.start(0);
+  race.state = 'racing';
+  race.lapStartMs = 0;
+  race.recording = [{ ms: 0, x: 1, z: 1, h: 0 }];
+  race.completeLap(30_000);                  // lap 1: fast → best
+  const best = race.bestRecording;
+  assert.ok(best && best.length === 2, 'best lap snapshotted');
+  assert.equal(best[0].x, 1);
+  race.recording.push({ ms: 0, x: 9, z: 9, h: 0 });
+  race.completeLap(75_000);                  // lap 2: 45 s, slower
+  assert.equal(race.bestLapMs, 30_000);
+  assert.equal(race.bestRecording, best, 'slower lap does not replace the ghost');
+  assert.equal(race.bestRecording[race.bestRecording.length - 1].ms, 30_000);
+  race.recording.push({ ms: 0, x: 5, z: 5, h: 0 });
+  race.completeLap(100_000);                 // lap 3: 25 s → new best, race over
+  assert.equal(race.bestLapMs, 25_000);
+  assert.equal(race.bestRecording[0].x, 5);
+  assert.equal(race.bestRecording[race.bestRecording.length - 1].ms, 25_000);
+});
+
 test('rubber band keeps the race close', () => {
   // a mediocre-but-sane pilot: the autopilot with a weak gain and a wobble,
   // like a real player who over- and under-steers. The rubber band and the
@@ -384,7 +468,7 @@ test('rubber band keeps the race close', () => {
   while (now < 90_000 && race.finishedMs === null) {
     now += DT * 1000;
     frame += 1;
-    drive(race, now, { lookahead: 18, gain: 16 });
+    drive(race, now, { lookahead: 18, gain: 90 });
     race.setSteer(race.steer + Math.sin(frame * 0.021) * 7);   // human wobble
     race.update(now, DT);
   }

@@ -7,6 +7,8 @@
  * its scene), holds a beat, and fades it out — so the launch reads as one
  * continuous motion across the page navigation, with no flash between.
  */
+import { icon } from './icons.js';
+
 /**
  * Leave a game for the menu, the console way: the HOME chime rings the
  * instant the button lands (when this page's audio is allowed to speak —
@@ -51,7 +53,7 @@ export function goHome(audio, room) {
 }
 
 /**
- * Returns the stashed launch payload (slug/title/emoji/colors/room) so the
+ * Returns the stashed launch payload (slug/title/icon/colors/room) so the
  * game can also recover the menu's room code, or undefined if there was
  * none to consume. The splash visual is a side effect; the return value is
  * what lets the game reclaim the same relay room instead of minting a new
@@ -72,7 +74,7 @@ export function consumeLaunchSplash() {
   if (!window.location.pathname.includes(`/games/${data.slug}/`)) return;
 
   const el = document.createElement('div');
-  el.innerHTML = `<div style="font-size:17vmin;filter:drop-shadow(0 1.2vmin 2.5vmin rgba(0,0,0,.3))">${data.emoji}</div>`
+  el.innerHTML = `<div style="font-size:17vmin;color:#fff;line-height:1;filter:drop-shadow(0 1.2vmin 2.5vmin rgba(0,0,0,.3))">${icon(data.icon)}</div>`
     + `<div style="font-size:5vmin;font-weight:700;color:#fff;text-shadow:0 .3vmin 1.2vmin rgba(0,0,0,.45)">${data.title}</div>`;
   el.style.cssText = 'position:fixed;inset:0;z-index:99;display:flex;flex-direction:column;'
     + 'align-items:center;justify-content:center;gap:2vmin;'

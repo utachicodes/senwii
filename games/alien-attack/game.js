@@ -6,8 +6,10 @@ const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { axesFromSample } from '../../core/orientation.js';
 import {
-  Patrol, TraySteer, fmtMs, LANE_HALF, LIVES,
+  Patrol, TraySteer, fmtMs, LANE_HALF, LIVES, LEVELS, levelDef, SAUCER_TYPES,
+  INTERMISSION_MS, loadProgress, saveProgress, unlockLevel, recordScore, stepLevel,
 } from './logic.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 /**
  * Alien Attack — renderer. Toy-box space: glossy plastic ships, candy
@@ -235,19 +237,31 @@ function puff(x, y, z, speed) {
   p.vel.set((Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 1.2, speed * 0.12 + 1.5);
 }
 
-// ── Saucers: three candy variants ──────────────────────────────────────────
-function makeSaucer(variant) {
+// ── Saucers: three candy scouts plus one look per special type ─────────────
+// Each special type gets its own colour AND silhouette so it reads at range:
+// the zig-zagger is teal with swept blades, the ironclad is steel with a
+// gold armour band (gone after the first hit), the diver is dark plum with
+// a red nose cone that glows when it winds up.
+const SCOUT_PALETTES = [
+  { hull: 0xff5d5d, dome: 0xb8ffd9, domeGlow: 0x2fae6b, ring: 0xffe9e9 },
+  { hull: 0xa06ce8, dome: 0xffd166, domeGlow: 0xa87716, ring: 0xe9dcff },
+  { hull: 0xffc23e, dome: 0x7fe8ff, domeGlow: 0x1a7fa8, ring: 0xfff3d4 },
+];
+const TYPE_PALETTES = {
+  zigzag: { hull: 0x2fe0c0, dome: 0xff9ae6, domeGlow: 0xc02f9e, ring: 0xd9fff6 },
+  tank: { hull: 0x8391b5, dome: 0xffa04d, domeGlow: 0xb5530f, ring: 0xffe2b0 },
+  diver: { hull: 0x3a2754, dome: 0xff5a5a, domeGlow: 0x8a1010, ring: 0xff9c9c },
+};
+const saucerColor = (a) => (a.type === 'scout' || !TYPE_PALETTES[a.type]
+  ? SCOUT_PALETTES[a.id % 3] : TYPE_PALETTES[a.type]).hull;
+
+function makeSaucer(type, variant) {
   const g = new THREE.Group();
   const spin = new THREE.Group();
   g.add(spin);
   g.userData.spin = spin;
 
-  const palettes = [
-    { hull: 0xff5d5d, dome: 0xb8ffd9, domeGlow: 0x2fae6b, ring: 0xffe9e9 },
-    { hull: 0xa06ce8, dome: 0xffd166, domeGlow: 0xa87716, ring: 0xe9dcff },
-    { hull: 0xffc23e, dome: 0x7fe8ff, domeGlow: 0x1a7fa8, ring: 0xfff3d4 },
-  ];
-  const p = palettes[variant % 3];
+  const p = TYPE_PALETTES[type] || SCOUT_PALETTES[variant % 3];
 
   const disc = new THREE.Mesh(new THREE.SphereGeometry(1.3, 22, 12), mat(p.hull, 0.25));
   disc.scale.y = 0.32;
@@ -257,10 +271,11 @@ function makeSaucer(variant) {
   belly.position.y = -0.18;
   spin.add(belly);
 
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.58, 16, 12),
-    new THREE.MeshStandardMaterial({
-      color: p.dome, roughness: 0.08, emissive: p.domeGlow, emissiveIntensity: 0.7,
-    }));
+  const domeMat = new THREE.MeshStandardMaterial({
+    color: p.dome, roughness: 0.08, emissive: p.domeGlow, emissiveIntensity: 0.7,
+  });
+  g.userData.domeMat = domeMat;
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.58, 16, 12), domeMat);
   dome.scale.y = 0.8;
   dome.position.y = 0.32;
   g.add(dome);
@@ -273,7 +288,44 @@ function makeSaucer(variant) {
     spin.add(bulb);
   }
 
-  if (variant % 3 === 1) {
+  if (type === 'zigzag') {
+    // Swept blades in an X: reads as "fast and twitchy" even edge-on.
+    for (const side of [-1, 1]) {
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(3.7, 0.08, 0.42), mat(0xd9fff6, 0.3));
+      blade.rotation.y = side * 0.55;
+      blade.position.y = -0.02;
+      g.add(blade);
+    }
+  } else if (type === 'tank') {
+    // Heavier body and a gold armour band that shatters on the first hit.
+    g.userData.base = 1.3;
+    const armor = new THREE.Mesh(new THREE.TorusGeometry(1.42, 0.24, 8, 28),
+      new THREE.MeshStandardMaterial({ color: 0xffb347, roughness: 0.25, metalness: 0.5 }));
+    armor.rotation.x = Math.PI / 2;
+    g.add(armor);
+    g.userData.armor = armor;
+    for (let i = 0; i < 4; i += 1) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      const stud = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), mat(0x5a6688, 0.4));
+      stud.position.set(Math.cos(a) * 1.42, 0.12, Math.sin(a) * 1.42);
+      g.add(stud);
+    }
+  } else if (type === 'diver') {
+    // A nose cone aimed at the player: the charge is telegraphed by shape.
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.62, 1.7, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xff4a4a, roughness: 0.3, emissive: 0x7a0000, emissiveIntensity: 0.4,
+      }));
+    cone.rotation.x = Math.PI / 2;
+    cone.position.set(0, -0.05, 1.25);
+    g.add(cone);
+    g.userData.coneMat = cone.material;
+    for (const side of [-1, 1]) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.6, 1.1), mat(0xff9c9c, 0.3));
+      fin.position.set(side * 0.9, 0.2, 0.2);
+      g.add(fin);
+    }
+  } else if (variant % 3 === 1) {
     for (const side of [-1, 1]) {
       const podArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.5, 6, 8), mat(p.hull, 0.3));
       podArm.rotation.z = Math.PI / 2;
@@ -292,6 +344,68 @@ function makeSaucer(variant) {
   return g;
 }
 const saucers = new Map();          // alien id → group
+
+// ── The boss: a candy mothership with a cannon skirt ──────────────────────
+function makeBoss(final) {
+  const g = new THREE.Group();
+  const spin = new THREE.Group();
+  g.add(spin);
+  const hullC = final ? 0xff3b6b : 0xa06ce8;
+  const hullMat = new THREE.MeshStandardMaterial({
+    color: hullC, roughness: 0.25, emissive: 0xffffff, emissiveIntensity: 0,
+  });
+  const disc = new THREE.Mesh(new THREE.SphereGeometry(4.2, 36, 16), hullMat);
+  disc.scale.y = 0.3;
+  spin.add(disc);
+  const deck = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.32, 10, 40), mat(0xf2f5f9, 0.3));
+  deck.rotation.x = Math.PI / 2;
+  deck.position.y = 0.45;
+  g.add(deck);
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(2.2, 24, 12), mat(0x2a2342, 0.4));
+  belly.scale.y = 0.45;
+  belly.position.y = -0.55;
+  g.add(belly);
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(1.7, 24, 16),
+    new THREE.MeshStandardMaterial({
+      color: final ? 0xffe06b : 0xb8ffd9, roughness: 0.08,
+      emissive: final ? 0xb57d00 : 0x2fae6b, emissiveIntensity: 0.8,
+    }));
+  dome.scale.y = 0.8;
+  dome.position.y = 0.9;
+  g.add(dome);
+  for (let i = 0; i < 16; i += 1) {
+    const a = (i / 16) * Math.PI * 2;
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6),
+      glow(i % 2 ? 0xffe9e9 : (final ? 0xffd166 : 0x7fe8ff)));
+    bulb.position.set(Math.cos(a) * 3.95, 0.05, Math.sin(a) * 3.95);
+    spin.add(bulb);
+  }
+  // Cannon skirt facing the player.
+  const n = final ? 5 : 3;
+  for (let i = 0; i < n; i += 1) {
+    const k = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.32, 1.4, 10),
+      mat(0x3b3358, 0.4));
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(k * 2.2, -0.45, 2.9);
+    g.add(barrel);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), glow(0xff9066));
+    tip.position.set(k * 2.2, -0.45, 3.6);
+    g.add(tip);
+  }
+  if (final) {
+    for (const side of [-1, 1]) {
+      const horn = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.4, 10), mat(0xffd166, 0.3));
+      horn.position.set(side * 3.4, 0.9, 0);
+      horn.rotation.z = -side * 0.5;
+      g.add(horn);
+    }
+  }
+  g.scale.setScalar(1.1);
+  g.userData = { spin, hullMat };
+  return g;
+}
+let bossMesh = null;
 
 // ── Bolts ──────────────────────────────────────────────────────────────────
 const boltGeo = new THREE.CapsuleGeometry(0.1, 1.6, 4, 8);
@@ -347,16 +461,25 @@ const game = new Patrol({ onEvent: handleEvent, seed: (performance.now() * 997) 
 let started = false;
 
 // Failsafe for the one thing only a real hand can prove: if steering ever
-// feels backwards on a device, press I once and it sticks. The capture,
-// anti-drift, grip-change re-centring and smoothing all live in TraySteer
-// (core/tilt.js) — the game only feeds it samples and reads the result.
-let invertSteer = localStorage.getItem('senwii.chargeInvert2') === '1';
+// feels backwards on a device, press I once and it sticks. Capture and
+// anti-drift live in TraySteer (core/tilt.js).
+// Every storage touch is guarded: private windows and blocked site data throw.
+const store = (() => { try { return window.localStorage; } catch { return null; } })();
+const readKey = (k) => { try { return store ? store.getItem(k) : null; } catch { return null; } };
+const writeKey = (k, v) => { try { if (store) store.setItem(k, v); } catch { /* best effort */ } };
+
+// Sector progression: the highest sector reached is unlocked as a start.
+let progress = loadProgress(store);
+let selectedLevel = progress.unlocked;
+let overlayOpen = false;
+
+let invertSteer = readKey('senwii.chargeInvert2') === '1';
 const steer = new TraySteer({ invert: invertSteer });
 
 const channel = createChannel({
   room: launchData?.room,
   onA: () => {
-    if (!started || game.state === 'done') { startRun(); return; }
+    if (!started || game.state === 'done') { startRun(selectedLevel); return; }
     if (game.shoot(performance.now())) {
       channel.audio.play('aa-laser');
       muzzleUntil = performance.now() + 70;
@@ -364,14 +487,47 @@ const channel = createChannel({
   },
   onCommand: (cmd) => {
     if (cmd.type === 'calibrate' || cmd.type === 'recentre') steer.recentre();
+    if (cmd.type === 'button') {
+      // One step per press: the crosspad's on-screen direction when the
+      // phone sends it, else the physical button.
+      const dir = cmd.menuDirection || cmd.button;
+      if (dir === 'up') pickLevel(-1);
+      else if (dir === 'down') pickLevel(1);
+    }
   },
   onSample: (sample, dt, now) => {
-    game.setSteer(steer.update(axesFromSample(sample), dt, now));
+    game.setSteer(steer.update(axesFromSample(sample), dt, now, channel.pointer.bodyRate));
   },
 });
 
 // Dev console hook: step the sim by hand while the renderer draws it.
-window.__debug = { game, channel: () => channel };
+window.__debug = {
+  game,
+  channel: () => channel,
+  progress: () => progress,
+  /** Meet the current sector's goal right now (boss sectors: one hit left). */
+  clear() {
+    if (game.state !== 'running') return false;
+    if (game.def.boss) {
+      if (!game.boss) game.spawnBoss(performance.now());
+      game.boss.hp = 1;
+      game.boss.gap = 48;
+      game.boss.z = game.z + game.boss.gap;
+      game.bolts.push({ x: game.boss.x, z: game.boss.z - 1, born: game.z });
+      return true;
+    }
+    game.clearLevel(performance.now());
+    return true;
+  },
+  /** Jump straight into sector n mid-run (lives and score kept). */
+  skipTo(n) {
+    for (const m of saucers.values()) scene.remove(m);
+    saucers.clear();
+    game.aliens = [];
+    game.alienBolts = [];
+    game.beginLevel(n, performance.now());
+  },
+};
 
 // ── Sound design ───────────────────────────────────────────────────────────
 // Proper arcade SFX instead of recycled UI blips. Every cue can be replaced
@@ -414,27 +570,64 @@ audio.register('aa-down', (a) => {
   a.tone({ freq: 70, slideTo: 34, dur: 0.35, type: 'sine', gain: 0.5, delay: 0.75, attack: 0.002 });
 });
 
+// Sector cleared: a bright rising arpeggio.
+audio.register('aa-clear', (a) => {
+  [523, 659, 784, 1047].forEach((f, i) => {
+    a.tone({ freq: f, dur: 0.16, type: 'square', gain: 0.1, delay: i * 0.08 });
+  });
+  a.tone({ freq: 1568, dur: 0.35, type: 'triangle', gain: 0.12, delay: 0.32 });
+});
+
+// Armour cracking: a hard metallic clank.
+audio.register('aa-clank', (a) => {
+  a.tone({ freq: 880, slideTo: 620, dur: 0.09, type: 'square', gain: 0.12 });
+  a.noise({ dur: 0.08, gain: 0.18, type: 'bandpass', freq: 4200, q: 4 });
+});
+
+// The boss arrives: a two-tone klaxon, three times.
+audio.register('aa-warn', (a) => {
+  for (let i = 0; i < 3; i += 1) {
+    a.tone({ freq: 440, dur: 0.18, type: 'sawtooth', gain: 0.12, delay: i * 0.4 });
+    a.tone({ freq: 330, dur: 0.18, type: 'sawtooth', gain: 0.12, delay: i * 0.4 + 0.2 });
+  }
+});
+
+// A diver locking on: a short rising whine.
+audio.register('aa-lock', (a) => {
+  a.tone({ freq: 300, slideTo: 1400, dur: 0.45, type: 'sawtooth', gain: 0.06 });
+});
+
 const keys = {};
 window.addEventListener('keydown', (e) => {
   keys[e.key] = true;
   if (e.key.toLowerCase() === 'i') {
     invertSteer = !invertSteer;
     steer.setInvert(invertSteer);
-    localStorage.setItem('senwii.chargeInvert2', invertSteer ? '1' : '0');
+    writeKey('senwii.chargeInvert2', invertSteer ? '1' : '0');
     popup(invertSteer ? 'steering inverted' : 'steering normal');
+  }
+  if (overlayOpen && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    e.preventDefault();
+    if (!e.repeat) pickLevel(e.key === 'ArrowUp' ? -1 : 1);
   }
 });
 window.addEventListener('keyup', (e) => { keys[e.key] = false; });
 
-function startRun() {
-  started = true;
-  steer.recentre();                  // your pose at rest becomes "straight"
+function clearSky() {
   for (const m of saucers.values()) scene.remove(m);
   saucers.clear();
-  game.start(performance.now());
+  if (bossMesh) { scene.remove(bossMesh); bossMesh = null; }
+}
+
+function startRun(level = 1) {
+  started = true;
+  steer.recentre();                  // your pose right now becomes "straight"
+  clearSky();
+  game.start(performance.now(), level);
   for (const s of streaks) respawnStreak(s, game.z - 30);
   for (const d of debris) respawnDebris(d, game.z);
   $('overlay').classList.add('hide');
+  overlayOpen = false;
   syncHud();
 }
 
@@ -445,21 +638,104 @@ function popup(text) {
   popupUntil = performance.now() + 700;
 }
 
+// Centre-screen banner: sector intros, boss warnings, the cleared card.
+let bannerUntil = 0;
+let bannerCountdown = null;          // { el, until } — live "next sector in…"
+function banner(html, ms, cls = '') {
+  const el = $('banner');
+  el.className = `on ${cls}`;
+  el.innerHTML = html;
+  bannerUntil = performance.now() + ms;
+  bannerCountdown = null;
+}
+
 let vignetteUntil = 0;
 let muzzleUntil = 0;
 let shake = 0;
 function syncHud() {
   $('score').textContent = game.score;
   $('meta').textContent = `${game.kills} kill${game.kills === 1 ? '' : 's'} · ${Math.floor(game.z)}m`;
-  $('lives').textContent = '💚'.repeat(Math.max(0, game.lives)) + '🖤'.repeat(LIVES - Math.max(0, game.lives));
+  const alive = Math.max(0, game.lives);
+  $('lives').innerHTML = icon('heart', 'fill').repeat(alive) + `<span class="lost">${icon('heart').repeat(LIVES - alive)}</span>`;
+
+  const d = game.def;
+  $('sector').innerHTML = `${d.boss ? icon('skull') : icon('flag')} Sector ${game.level}`
+    + `<span> · ${d.name}</span>`;
+  $('goal-fill').style.width = `${(game.progress * 100).toFixed(1)}%`;
+  $('goal-t').textContent = d.boss
+    ? (game.bossDefeated ? 'boss down' : 'defeat the boss')
+    : `${Math.min(game.levelKills, d.goal)} / ${d.goal} kills`;
+
+  const boss = game.boss;
+  $('bossbar').classList.toggle('on', !!boss);
+  if (boss) {
+    $('boss-name').innerHTML = `${icon('skull')} ${boss.name}`;
+    $('boss-fill').style.width = `${(100 * boss.hp / boss.maxHp).toFixed(1)}%`;
+  }
 }
+
+// ── Level select: a carousel on the overlay, d-pad / ↑↓ to move ───────────
+function pickLevel(dir) {
+  if (!overlayOpen) return;
+  const next = stepLevel(selectedLevel, dir, progress.unlocked);
+  if (next === selectedLevel) return;
+  selectedLevel = next;
+  const el = $('picker');
+  if (el) el.outerHTML = pickerHtml();
+}
+
+function pickerHtml() {
+  const row = (n, cls) => {
+    if (n < 1 || n > LEVELS.length) return `<div class="lv-row ${cls} empty"></div>`;
+    const d = levelDef(n);
+    const locked = n > progress.unlocked;
+    const tag = locked ? icon('lock') : d.boss ? icon('skull') : icon('flag');
+    return `<div class="lv-row ${cls}${locked ? ' locked' : ''}${d.boss ? ' boss' : ''}">`
+      + `${tag}<b>Sector ${n}</b><span>${locked ? 'locked' : d.name}</span></div>`;
+  };
+  const pips = LEVELS.map((d, i) => {
+    const n = i + 1;
+    const cls = [n === selectedLevel ? 'sel' : '', n > progress.unlocked ? 'locked' : '',
+      d.boss ? 'boss' : ''].join(' ');
+    return `<i class="pip ${cls}"></i>`;
+  }).join('');
+  const intro = levelDef(selectedLevel).intro;
+  return `<div id="picker">
+      <div class="lv-hint">↑</div>
+      ${row(selectedLevel - 1, 'dim')}
+      ${row(selectedLevel, 'cur')}
+      ${row(selectedLevel + 1, 'dim')}
+      <div class="lv-hint">↓</div>
+      <div class="pips">${pips}</div>
+      <div class="lv-note">${levelDef(selectedLevel).boss
+        ? `${icon('skull')} boss sector`
+        : intro ? `${icon('star')} debut: ${SAUCER_TYPES[intro].label}` : '&nbsp;'}</div>
+    </div>`;
+}
+
+function showOverlay(html) {
+  $('panel').innerHTML = html;
+  $('overlay').classList.remove('hide');
+  overlayOpen = true;
+}
+
+const TYPE_BLURB = {
+  zigzag: 'Zig-zagger — darts across the lane in straight legs',
+  tank: 'Ironclad — gold armour soaks the first hit',
+  diver: 'Diver — glows red, then charges where you are. Keep moving!',
+};
 
 function handleEvent(e) {
   if (e.type === 'kill') {
-    explode(e.alien.x, e.alien.z, [0xff5d5d, 0xa06ce8, 0xffc23e][e.alien.id % 3]);
+    explode(e.alien.x, e.alien.z, saucerColor(e.alien), true);
     shake = Math.min(0.5, shake + 0.22);
     channel.feedback({ type: 'slice', combo: 1 });
     channel.audio.play('aa-explosion');
+  } else if (e.type === 'armor') {
+    explode(e.alien.x, e.alien.z, 0xffb347, false);
+    channel.audio.play('aa-clank');
+  } else if (e.type === 'windup') {
+    channel.audio.play('aa-lock');
   } else if (e.type === 'hit') {
     explode(game.x, game.z + 1, 0xff8a6a, true);
     shake = 1;
@@ -468,19 +744,78 @@ function handleEvent(e) {
     popup(e.lives > 0 ? `${e.lives} ${e.lives === 1 ? 'life' : 'lives'} left` : '');
     vignetteUntil = performance.now() + 450;
     $('vignette').classList.add('on');
-  } else if (e.type === 'alienFire') {
+  } else if (e.type === 'alienFire' || e.type === 'bossFire') {
     channel.audio.play('aa-alien-laser');
+  } else if (e.type === 'level') {
+    // Reaching a sector unlocks it as a starting point next time.
+    progress = unlockLevel(progress, e.level);
+    saveProgress(store, progress);
+    const d = e.def;
+    const sub = d.boss ? `${icon('skull')} boss sector`
+      : d.intro ? `${icon('star')} new: ${TYPE_BLURB[d.intro]}`
+        : `${icon('target')} ${d.goal} kills to clear`;
+    banner(`<small>Sector ${e.level} of ${LEVELS.length}</small><h2>${d.name}</h2><p>${sub}</p>`,
+      d.intro ? 2600 : 1800);
+  } else if (e.type === 'bossSpawn') {
+    bossMesh = makeBoss(e.boss.final);
+    scene.add(bossMesh);
+    channel.audio.play('aa-warn');
+    banner(`<small>${icon('warning')} Warning</small><h2>${e.boss.name}</h2>`
+      + `<p>${icon('target')} ${e.boss.maxHp} hits to bring it down</p>`, 2000, 'warn');
+  } else if (e.type === 'bossHit') {
+    explode(e.boss.x + (Math.random() - 0.5) * 3, e.boss.z - 2, 0xffd166, false);
+    shake = Math.min(0.6, shake + 0.12);
+    channel.audio.play('aa-clank');
+  } else if (e.type === 'bossDown') {
+    for (let i = 0; i < 6; i += 1) {
+      explode(e.boss.x + (Math.random() - 0.5) * 7, e.boss.z + (Math.random() - 0.5) * 4,
+        [0xffd166, 0xff5d5d, 0xa06ce8][i % 3], true);
+    }
+    if (bossMesh) { scene.remove(bossMesh); bossMesh = null; }
+    shake = 1;
+    channel.feedback({ type: 'bomb' });
+    channel.audio.play('aa-explosion');
+    channel.audio.play('aa-down');
+    if (e.extraLife) popup('+1 life');
+  } else if (e.type === 'cleared') {
+    for (const a of e.purged) explode(a.x, a.z, saucerColor(a), false);
+    channel.audio.play('aa-clear');
+    if (e.final) return;             // the win screen takes over
+    const acc = Math.round(e.accuracy * 100);
+    banner(`<small>${icon('flag')} Sector ${e.level} cleared</small><h2>${e.name}</h2>
+      <div class="row">
+        <span class="stat"><b>${e.kills}</b><span>kills</span></span>
+        <span class="stat"><b>${acc}%</b><span>accuracy</span></span>
+        <span class="stat"><b>${fmtMs(e.timeMs)}</b><span>time</span></span>
+        <span class="stat"><b>+${e.bonus}</b><span>bonus</span></span>
+      </div>
+      ${e.flawless ? `<p class="gold">${icon('star', 'fill')} Flawless!</p>` : ''}
+      <p>Next: Sector ${e.next} — ${levelDef(e.next).name} <span id="countdown"></span></p>`,
+    INTERMISSION_MS, 'cleared');
+    bannerCountdown = { until: performance.now() + INTERMISSION_MS };
   } else if (e.type === 'done') {
-    $('panel').innerHTML = `<h1>💥 <em>Shot down!</em></h1>
+    const newBest = e.score > progress.best;
+    progress = recordScore(progress, e.score);
+    saveProgress(store, progress);
+    selectedLevel = Math.min(progress.unlocked, e.won ? 1 : e.level);
+    $('bossbar').classList.remove('on');
+    $('banner').className = '';
+    bannerUntil = 0;
+    const head = e.won
+      ? `<h1>${icon('trophy')} <em>Galaxy saved!</em></h1>`
+      : `<h1>${icon('burst')} <em>Shot down!</em></h1>
+         <p>${icon('skull')} Fell in Sector ${e.level} — ${levelDef(e.level).name}</p>`;
+    showOverlay(`${head}
       <div>
         <span class="stat"><b>${e.score}</b><span>score</span></span>
         <span class="stat"><b>${e.kills}</b><span>kills</span></span>
         <span class="stat"><b>${e.distanceM}m</b><span>flown</span></span>
         <span class="stat"><b>${fmtMs(e.timeMs)}</b><span>survived</span></span>
       </div>
-      <div class="cta"><strong>A</strong> fly again · <strong>B</strong> menu</div>`;
-    $('overlay').classList.remove('hide');
-    channel.audio.play('aa-down');
+      <p class="best">${icon('trophy')} ${newBest ? 'New best!' : `Best ${progress.best}`}</p>
+      ${pickerHtml()}
+      <div class="cta"><strong>↑ ↓</strong> pick sector · <strong>A</strong> fly · <strong>B</strong> menu</div>`);
+    if (!e.won) channel.audio.play('aa-down');
   }
 }
 
@@ -500,16 +835,18 @@ function frame(now) {
   if (dt <= 0) return;
 
   channel.poll(now);
-  // Between rounds the phone rests in whatever pose the player left it:
-  // mark the steer idle so that pose becomes the next round's neutral.
-  steer.idle = game.state !== 'running';
   if (!channel.pointer.live) {
     const bank = (keys.ArrowRight ? 15 : 0) + (keys.ArrowLeft ? -15 : 0);
     if (bank || keys._touched) { game.setSteer(bank); keys._touched = true; }
   }
   game.update(now, dt);
-  if (game.state === 'running') syncHud();
+  if (game.state === 'running' || game.state === 'cleared') syncHud();
   if (popupUntil && now > popupUntil) { $('popup').classList.remove('on'); popupUntil = 0; }
+  if (bannerUntil && now > bannerUntil) { $('banner').className = ''; bannerUntil = 0; }
+  if (bannerCountdown) {
+    const cd = document.getElementById('countdown');
+    if (cd) cd.textContent = `in ${Math.max(0, Math.ceil((bannerCountdown.until - now) / 1000))}`;
+  }
   if (vignetteUntil && now > vignetteUntil) { $('vignette').classList.remove('on'); vignetteUntil = 0; }
 
   // The ship: position from logic, banking + a touch of yaw into the strafe.
@@ -546,15 +883,39 @@ function frame(now) {
   for (const a of game.aliens) {
     liveIds.add(a.id);
     let m = saucers.get(a.id);
-    if (!m) { m = makeSaucer(a.id % 3); scene.add(m); saucers.set(a.id, m); }
+    if (!m) { m = makeSaucer(a.type, a.id % 3); scene.add(m); saucers.set(a.id, m); }
     const pop = easeOutBack(Math.min(1, (now - a.bornMs) / 300));
-    m.scale.setScalar(pop);
+    const flash = now < a.flashUntil ? 1.18 : 1;
+    m.scale.setScalar(pop * (m.userData.base || 1) * flash);
     m.position.set(a.x, Math.sin(now / 300 + a.phase) * 0.45, wz(a.z));
     m.rotation.z = Math.sin(now / 480 + a.phase) * 0.12;
-    m.userData.spin.rotation.y = now / 320 + a.phase;
+    m.rotation.x = 0;
+    m.userData.spin.rotation.y = now / (a.type === 'zigzag' ? 140 : 320) + a.phase;
+    if (m.userData.armor) m.userData.armor.visible = a.hp > 1;
+    if (a.type === 'zigzag') m.rotation.z = THREE.MathUtils.clamp(-(a.x - (m.userData.lastX ?? a.x)) * 6, -0.5, 0.5);
+    m.userData.lastX = a.x;
+    if (a.type === 'diver') {
+      // Wind-up: the dome and cone throb red; the dive pitches it nose-down.
+      const hot = a.mode === 'windup' ? 0.5 + 0.5 * Math.sin(now / 45) : a.mode === 'dive' ? 1 : 0;
+      m.userData.domeMat.emissiveIntensity = 0.7 + hot * 1.6;
+      m.userData.coneMat.emissiveIntensity = 0.4 + hot * 2.2;
+      m.rotation.x = a.mode === 'dive' ? 0.35 : 0;
+    }
   }
   for (const [id, m] of saucers) {
     if (!liveIds.has(id)) { scene.remove(m); saucers.delete(id); }
+  }
+
+  // The boss: rides its station, bobs, spins its lights, flashes when hit.
+  if (bossMesh && game.boss) {
+    const b = game.boss;
+    bossMesh.position.set(b.x, 1.2 + Math.sin(now / 520) * 0.5, wz(b.z));
+    bossMesh.rotation.z = Math.sin(now / 900) * 0.08 - (b.x / 40);
+    bossMesh.userData.spin.rotation.y = now / 600;
+    bossMesh.userData.hullMat.emissiveIntensity = now < b.flashUntil ? 0.55 : 0;
+  } else if (bossMesh && !game.boss) {
+    scene.remove(bossMesh);
+    bossMesh = null;
   }
 
   // Bolts, both sides, from one recycled pool.
@@ -639,6 +1000,7 @@ function frame(now) {
     dbg.textContent = `state ${game.state}\nz ${game.z.toFixed(1)} x ${game.x.toFixed(2)}\n`
       + `speed ${game.speed.toFixed(1)} steer ${game.steer.toFixed(1)}°\n`
       + `tilt ${steer.describe()}\n`
+      + `sector ${game.level} ${game.levelKills}/${game.def.goal} ${game.boss ? `boss ${game.boss.hp}` : ''}\n`
       + `aliens ${game.aliens.length} bolts ${game.bolts.length}/${game.alienBolts.length}\n`
       + `lives ${game.lives} invert ${invertSteer}`;
   }
@@ -648,8 +1010,10 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // Launching from the menu goes straight into flight — no instruction screen.
-// The neutral capture waits for the phone to be still (the hand is still
-// coming down from pointing at the tile), and the first wave holds off a
-// moment.
-startRun();
+// The neutral capture waits out the boot grace (the hand is still coming
+// down from pointing at the tile), and the first wave holds off a moment.
+startRun(progress.unlocked);
+steer.recentre(performance.now() + 1800);
 game.nextSpawnMs = performance.now() + 2400;
+
+hydrateIcons();

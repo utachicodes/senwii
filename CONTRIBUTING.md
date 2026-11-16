@@ -28,7 +28,7 @@ visual: scoring, collision, win conditions, the stuff a reviewer can't verify
 by eyeballing a screenshot.
 
 `game.json` is optional and only feeds the launcher card (`title`, `tagline`,
-`emoji`, `players`). Set `hidden: true` while a game is still rough — it stays
+`icon` — a name from `core/icons.js`, `players`). Set `hidden: true` while a game is still rough — it stays
 reachable by direct URL but off the menu — and drop it once you're ready for
 it to show up for everyone.
 

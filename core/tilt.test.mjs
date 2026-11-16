@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   TraySteer, SteerFilter, captureTray, trayRead, shapeSteer,
-  STEER_FULL, STEER_DEADZONE, SMOOTH_TAU_S,
+  STEER_FULL, STEER_DEADZONE, gyroBankRate, LEAD_CAP_DEG,
 } from './tilt.js';
 
 // ── The tray pose, the same rig alien-attack's tests proved ────────────────
@@ -46,132 +46,72 @@ function run(steer, poses, { dt = DT } = {}) {
   return out;
 }
 
-test('TraySteer: stillness-gated capture, neutral reads zero, rolls read true', () => {
+test('TraySteer: captures the pose at start, neutral reads zero, rolls read true', () => {
   for (const flip of ['A', 'B']) {
     const rest = trayGrip(flip);
     const steer = new TraySteer({});
-    // 1s of jittery rest (±0.5° around the true pose) then a hold.
-    const jitter = [];
-    for (let i = 0; i < 60; i += 1) {
-      jitter.push(rotAxes(rest, NORTH, (Math.random() - 0.5) * 1));
-    }
-    run(steer, jitter);
-    for (let i = 0; i < 90; i += 1) steer.update(rest, DT, (i + 61) * 16.7);
-    assert.equal(steer.status, 'locked', 'captured once the phone held still');
-    // Roll 12°: after the ramp settles, the output tracks the roll.
-    let out = 0;
-    const rolled = rotAxes(rest, NORTH, 12 * (Math.PI / 180));
-    for (let i = 0; i < 120; i += 1) out = steer.update(rolled, DT, 0);
-    assert.ok(out > 8, `a 12° roll steers hard after the ramp (${out.toFixed(1)})`);
-    // Back to rest: zero, quickly — the smoothing carries no offset.
-    out = run(steer, Array(120).fill(rest));
-    assert.ok(Math.abs(out) < 0.5, `rest reads centred (${out.toFixed(2)})`);
+    assert.equal(run(steer, [rest]), 0);
+    assert.equal(steer.status, 'locked', 'first sample is the neutral');
+    const right = rotAxes(rest, NORTH, 15 * (Math.PI / 180));
+    const left = rotAxes(rest, NORTH, -15 * (Math.PI / 180));
+    assert.ok(run(steer, [right]) > 12, `${flip}: right roll steers right`);
+    assert.ok(run(steer, [left]) < -12, `${flip}: left roll steers left`);
   }
 });
 
-test('TraySteer: a capture mid-motion is impossible — it waits for stillness', () => {
+test('TraySteer: steering responds on the very next sample (no smoothing lag)', () => {
   const rest = trayGrip('A');
   const steer = new TraySteer({});
-  // Swing hard for 2s straight: the hunt must never lock during the motion.
-  let t = 0;
-  for (let i = 0; i < 120; i += 1) {
-    t += DT * 1000;
-    steer.update(rotAxes(rest, NORTH, (i % 2 ? 20 : -20) * (Math.PI / 180)), DT, t);
-    assert.equal(steer.status, 'hunting', 'no capture while the hand moves');
-  }
-  // Then rest: it locks.
-  for (let i = 0; i < 90; i += 1) {
-    t += DT * 1000;
-    steer.update(rest, DT, t);
-  }
-  assert.equal(steer.status, 'locked');
+  run(steer, [rest]);
+  const out = steer.update(rotAxes(rest, NORTH, 18 * (Math.PI / 180)), DT, 100);
+  assert.ok(Math.abs(out - STEER_FULL) < 0.5, `full lock immediately (${out.toFixed(1)})`);
 });
 
-test('TraySteer: a capture taken at rest is unaffected by the give-up path', () => {
-  // Give-up must not hand back a mid-motion pose as neutral: the window it
-  // averages is always the still window, never the moving one.
+test('TraySteer: a hard bank held for seconds keeps steering — never re-centres mid-turn', () => {
+  // Regression: a grip-change detector read flat-tray banking as the phone
+  // being picked up, dropped the neutral and left the ship on reverse lock.
   const rest = trayGrip('A');
   const steer = new TraySteer({});
-  const HUNT_GIVE_UP_MS = 2500;
-  let t = 0;
-  // Move for just under the give-up time…
-  while (t < HUNT_GIVE_UP_MS - 200) {
-    t += DT * 1000;
-    steer.update(rotAxes(rest, NORTH, (Math.sin(t / 100) > 0 ? 1 : -1) * 15 * (Math.PI / 180)), DT, t);
+  run(steer, [rest]);
+  for (const deg of [30, 45, 60]) {
+    const bank = rotAxes(rest, NORTH, deg * (Math.PI / 180));
+    const out = run(steer, Array(120).fill(bank));          // 2s held
+    assert.ok(out > STEER_FULL, `${deg}° held: still steering right (${out.toFixed(1)})`);
+    assert.equal(steer.status, 'locked');
+    assert.equal(run(steer, [rest]), 0, `${deg}°: back to level reads straight`);
   }
-  // …then hold still: the capture is from the still pose.
-  for (let i = 0; i < 120; i += 1) {
-    t += DT * 1000;
-    steer.update(rest, DT, t);
-  }
-  assert.equal(steer.status, 'locked');
-  const out = run(steer, Array(60).fill(rest));
-  assert.ok(Math.abs(out) < 0.5, `captured neutral is this exact pose (${out.toFixed(2)})`);
 });
 
-test('TraySteer: output is smoothed — packet noise cannot reach the vehicle', () => {
+test('TraySteer: recentre(notBefore) waits out the grace, then captures', () => {
   const rest = trayGrip('A');
+  const tilted = rotAxes(rest, NORTH, 20 * (Math.PI / 180));
   const steer = new TraySteer({});
-  for (let i = 0; i < 90; i += 1) steer.update(rest, DT, i * 16.7);
-  // Feed a clean 12° roll, then measure step-to-step variation at the output.
-  const rolled = rotAxes(rest, NORTH, 12 * (Math.PI / 180));
-  const outs = [];
-  for (let i = 0; i < 60; i += 1) outs.push(steer.update(rolled, DT, 0));
-  for (let i = 1; i < outs.length; i += 1) {
-    const jump = Math.abs(outs[i] - outs[i - 1]);
-    // The slew cap (300°/s at 60Hz = 5°/frame) bounds every step.
-    assert.ok(jump <= 5 + 1e-9, `no teleporting steps (${jump.toFixed(2)}°)`);
-  }
-  assert.ok(outs[outs.length - 1] > 8, 'and the real steering still arrives');
+  steer.recentre(1000);
+  assert.equal(steer.update(tilted, DT, 500), 0, 'no steer during grace');
+  assert.equal(steer.status, 'hunting');
+  steer.update(rest, DT, 1000);
+  assert.equal(steer.status, 'locked');
+  assert.ok(steer.update(tilted, DT, 1016) > 12, 'captured the post-grace pose');
 });
 
-test('TraySteer: grip change (pitch move held) re-hunts and re-centres', () => {
+test('TraySteer: a corrupt packet holds the last output', () => {
   const rest = trayGrip('A');
   const steer = new TraySteer({});
-  for (let i = 0; i < 90; i += 1) steer.update(rest, DT, i * 16.7);
-  assert.equal(steer.status, 'locked');
-  const pitch0 = steer.pitch0;
-  // Player picks the phone up (whole frame tips 60° about the east axis —
-  // a rigid rotation, like lifting the far end) and holds it there.
-  const held = rotAxes(rest, { x: 1, y: 0, z: 0 }, 60 * (Math.PI / 180));
-  let t = 100_000;
-  for (let i = 0; i < 30; i += 1) {    // 0.5s: past GRIP_CHANGE_MS
-    t += DT * 1000;
-    steer.update(held, DT, t);
-  }
-  assert.equal(steer.status, 'hunting', 'the stale reference was dropped fast');
-  // And the held pose becomes the new neutral once it holds still…
-  for (let i = 0; i < 90; i += 1) {
-    t += DT * 1000;
-    steer.update(held, DT, t);
-  }
-  assert.equal(steer.status, 'locked');
-  assert.notEqual(steer.pitch0, pitch0, 're-anchored to the new pose');
-  // …and laying it back down re-centres on the original pose too.
-  for (let i = 0; i < 90; i += 1) {
-    t += DT * 1000;
-    steer.update(rest, DT, t);
-  }
-  assert.equal(steer.status, 'locked');
-  const out = run(steer, Array(60).fill(rest));
-  assert.ok(Math.abs(out) < 0.5, `re-centred on the true pose (${out.toFixed(2)})`);
+  run(steer, [rest]);
+  const out = steer.update(rotAxes(rest, NORTH, 15 * (Math.PI / 180)), DT, 50);
+  const bad = { x: { x: NaN, y: 0, z: 0 }, y: { x: NaN, y: NaN, z: NaN }, z: { x: 0, y: 0, z: NaN } };
+  assert.equal(steer.update(bad, DT, 66), out);
 });
 
 test('TraySteer: idle re-zero adopts the resting pose before a new round', () => {
   const rest = trayGrip('A');
   const steer = new TraySteer({});
-  for (let i = 0; i < 90; i += 1) steer.update(rest, DT, i * 16.7);
-  // The phone now rests at a genuine 6° bank (dropped slightly crooked).
-  const crooked = rotAxes(rest, NORTH, 6 * (Math.PI / 180));
+  run(steer, [rest]);
+  const crooked = rotAxes(rest, NORTH, 9 * (Math.PI / 180));
   steer.idle = true;
   for (let i = 0; i < 180; i += 1) steer.update(crooked, DT, 0);   // 3s idle
   steer.idle = false;
-  const out = run(steer, Array(90).fill(crooked));
-  assert.ok(Math.abs(out) < 1, `the crooked rest became neutral (${out.toFixed(2)})`);
-  // …but during play the same filter refuses to eat a held steer.
-  const steer2 = new SteerFilter();
-  for (let i = 0; i < 60 * 5; i += 1) steer2.update(10, DT);
-  assert.ok(steer2.update(10, DT) > 6, 'a held 10° steer survives');
+  assert.equal(steer.update(crooked, DT, 0), 0, 'resting pose is the new straight');
 });
 
 test('TraySteer: invert flips the output, not the capture', () => {
@@ -203,5 +143,94 @@ test('the capture math still agrees with the device-pinned proofs', () => {
   assert.ok(Math.abs(trayRead(rolled, ref).bank - 25) < 1e-6, 'pinned sign: +right');
   assert.equal(shapeSteer(STEER_FULL), STEER_FULL, 'full lock preserved');
   assert.equal(shapeSteer(STEER_DEADZONE - 0.1), 0, 'deadzone preserved');
-  assert.ok(SMOOTH_TAU_S > 0 && SMOOTH_TAU_S < 0.2, 'smoothing stays out of the way');
+});
+
+// ── Gyro boost: lag compensation ────────────────────────────────────────────
+
+/** Body-frame angular velocity between two attitudes, deg/s (numeric truth). */
+function omegaBody(a1, a2, h) {
+  const col = (a, k) => [a[k].x, a[k].y, a[k].z];
+  const R1 = [col(a1, 'x'), col(a1, 'y'), col(a1, 'z')];
+  const R2 = [col(a2, 'x'), col(a2, 'y'), col(a2, 'z')];
+  const M = [0, 1, 2].map((i) => [0, 1, 2].map(
+    (j) => R1[i][0] * R2[j][0] + R1[i][1] * R2[j][1] + R1[i][2] * R2[j][2],
+  ));
+  const D = 180 / Math.PI;
+  return {
+    x: ((M[2][1] - M[1][2]) / (2 * h)) * D,
+    y: ((M[0][2] - M[2][0]) / (2 * h)) * D,
+    z: ((M[1][0] - M[0][1]) / (2 * h)) * D,
+  };
+}
+
+test('gyroBankRate is the true derivative of the tray bank, both grips', () => {
+  for (const flip of ['A', 'B']) {
+    const rest = trayGrip(flip);
+    const ref = captureTray(rest);
+    for (const deg of [-30, -5, 0, 12, 40]) {
+      const at = (d) => rotAxes(rest, NORTH, d * (Math.PI / 180));
+      const h = 1e-4;
+      const a1 = at(deg);
+      const a2 = at(deg + 50 * h);                     // rolling at 50°/s
+      const numeric = (trayRead(a2, ref).bank - trayRead(a1, ref).bank) / h;
+      const g = gyroBankRate(a1, omegaBody(a1, a2, h), ref.sy);
+      assert.ok(Math.abs(g - numeric) < 0.5, `${flip} @${deg}°: ${g.toFixed(2)} vs ${numeric.toFixed(2)}`);
+    }
+  }
+});
+
+/**
+ * Roll the tray through a steering pattern. The fused attitude the steer sees
+ * lags the hand by `lagMs`; the gyro (bodyRate) is the true, unlagged rate,
+ * optionally mangled. Returns mean |steer − ideal steer| once settled.
+ */
+function boostRun({ lagMs, boost, gyro = (w) => w, secs = 10 }) {
+  const rest = trayGrip('A');
+  const bank = (t) => 22 * Math.sin(2 * Math.PI * 0.7 * t) + 8 * Math.sin(2 * Math.PI * 1.9 * t);
+  const pose = (t) => rotAxes(rest, NORTH, bank(Math.max(0, t)) * (Math.PI / 180));
+  const steer = new TraySteer({ boost });
+  const ideal = new TraySteer({ boost: false });     // same pipeline, zero-lag input
+  let err = 0;
+  let n = 0;
+  for (let i = 0; i < secs * 60; i += 1) {
+    const t = i * DT;
+    const h = 1e-4;
+    const w = omegaBody(pose(t), pose(t + h), h);
+    const out = steer.update(pose(t - lagMs / 1000), DT, t * 1000, gyro(w));
+    const want = ideal.update(pose(t), DT, t * 1000);
+    if (t > 4) { err += Math.abs(out - want); n += 1; }
+  }
+  return { err: err / n, steer };
+}
+
+test('gyro boost measures the phone\'s fusion lag and cancels most of it', () => {
+  const off = boostRun({ lagMs: 60, boost: false });
+  const on = boostRun({ lagMs: 60, boost: true });
+  const lag = on.steer.lag.lagS * 1000;
+  assert.ok(Math.abs(lag - 60) <= 15, `measured lag ${lag}ms for a 60ms phone`);
+  assert.ok(on.err < off.err * 0.4, `steer error ${on.err.toFixed(2)}° vs ${off.err.toFixed(2)}° unboosted`);
+});
+
+test('gyro boost does no harm on a phone without fusion lag', () => {
+  const on = boostRun({ lagMs: 0, boost: true });
+  assert.ok(on.steer.lag.lagS <= 0.015, `measured lag ${on.steer.lag.lagS * 1000}ms`);
+  assert.ok(on.err < 0.6, `tracks the hand (${on.err.toFixed(2)}°)`);
+});
+
+test('a backwards gyro can never make steering worse (lag reads 0, no boost)', () => {
+  const off = boostRun({ lagMs: 60, boost: false });
+  const bad = boostRun({ lagMs: 60, boost: true, gyro: (w) => ({ x: -w.x, y: -w.y, z: -w.z }) });
+  assert.equal(bad.steer.lag.lagS, 0);
+  assert.ok(Math.abs(bad.err - off.err) < 0.05, `${bad.err.toFixed(2)}° vs ${off.err.toFixed(2)}°`);
+});
+
+test('gyro boost vanishes at rest and is capped', () => {
+  const rest = trayGrip('A');
+  const steer = new TraySteer({});
+  for (let i = 0; i < 120; i += 1) steer.update(rest, DT, i * 16.7, { x: 0, y: 0, z: 0 });
+  assert.equal(steer.lead, 0);
+  assert.equal(steer.update(rest, DT, 3000, { x: 0, y: 0, z: 0 }), 0);
+  steer.lag.lagS = 0.12;
+  steer.update(rest, DT, 3016, { x: 5000, y: 5000, z: 5000 });
+  assert.ok(Math.abs(steer.lead) <= LEAD_CAP_DEG);
 });

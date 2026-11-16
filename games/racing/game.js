@@ -1,5 +1,6 @@
 import * as THREE from '/vendor/three/three.module.js';
-import { consumeLaunchSplash } from '../../core/splash.js';
+import { consumeLaunchSplash, goHome } from '../../core/splash.js';
+import { icon, hydrateIcons } from '../../core/icons.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
 const launchData = consumeLaunchSplash();
@@ -52,11 +53,20 @@ const wz = (z) => -z;
 const world = new THREE.Group();
 scene.add(world);
 
-function disposeWorld() {
-  world.traverse((o) => {
+/** Free an object tree's GPU resources (geometries, materials, their maps). */
+function disposeTree(root) {
+  root.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
-    if (o.material && !Array.isArray(o.material)) o.material.dispose();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (m.map) m.map.dispose();
+      m.dispose();
+    }
   });
+}
+
+function disposeWorld() {
+  disposeTree(world);
   world.clear();
 }
 
@@ -419,7 +429,8 @@ function buildMinimap(track) {
   const w = minimap.width; const h = minimap.height;
   mm.scale = Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxZ - minZ));
   mm.ox = w / 2 - ((minX + maxX) / 2) * mm.scale;
-  mm.oy = h / 2 - ((minZ + maxZ) / 2) * mm.scale;
+  // Screen y follows WORLD z (= −logic z, see wz) so the map isn't mirrored.
+  mm.oy = h / 2 + ((minZ + maxZ) / 2) * mm.scale;
   // Road: one static offscreen layer.
   const off = document.createElement('canvas');
   off.width = w; off.height = h;
@@ -431,7 +442,7 @@ function buildMinimap(track) {
   for (let i = 0; i <= 128; i += 1) {
     const p = mm.pts[i % 128];
     const x = p.x * mm.scale + mm.ox;
-    const y = p.z * mm.scale + mm.oy;
+    const y = -p.z * mm.scale + mm.oy;
     if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
   }
   g.stroke();
@@ -442,7 +453,7 @@ function buildMinimap(track) {
   const s = trackCenterAt(track, 0);
   g.fillStyle = '#ffd23e';
   g.beginPath();
-  g.arc(s.x * mm.scale + mm.ox, s.z * mm.scale + mm.oy, 4.5, 0, Math.PI * 2);
+  g.arc(s.x * mm.scale + mm.ox, -s.z * mm.scale + mm.oy, 4.5, 0, Math.PI * 2);
   g.fill();
   mm.road = off;
 }
@@ -454,7 +465,7 @@ function drawMinimap(race, now) {
   const dot = (x, z, color, r) => {
     mmCtx.fillStyle = color;
     mmCtx.beginPath();
-    mmCtx.arc(x * mm.scale + mm.ox, z * mm.scale + mm.oy, r, 0, Math.PI * 2);
+    mmCtx.arc(x * mm.scale + mm.ox, -z * mm.scale + mm.oy, r, 0, Math.PI * 2);
     mmCtx.fill();
   };
   for (const k of race.karts) {
@@ -471,6 +482,8 @@ let save = loadSave();
 let trackIndex = 0;
 const cupPoints = [0, 0, 0];
 
+const medalTag = (medal) => (medal ? `${icon('medal', medal)} ${medal}` : '');
+
 function syncTrackSelect() {
   const wrap = $('tracks');
   wrap.innerHTML = '';
@@ -480,9 +493,9 @@ function syncTrackSelect() {
     const medal = medalFor(t, best);
     const card = document.createElement('div');
     card.className = `track${i === trackIndex ? ' sel' : ''}${unlocked ? '' : ' locked'}`;
-    card.innerHTML = `<div class="te">${unlocked ? t.emoji : '🔒'}</div>
+    card.innerHTML = `<div class="te">${icon(unlocked ? t.icon : 'lock')}</div>
       <div class="tn">${t.name}</div>
-      <div class="tm">${unlocked ? (best ? `${fmtMs(best)} ${medal === 'gold' ? '🥇' : medal === 'silver' ? '🥈' : '🥉'}` : 'no record') : 'finish top 3 to unlock'}</div>`;
+      <div class="tm">${unlocked ? (best ? `${fmtMs(best)} ${medalTag(medal)}` : 'no record') : 'finish top 3 to unlock'}</div>`;
     wrap.appendChild(card);
   });
   const total = cupPoints.reduce((a, b) => a + b, 0);
@@ -494,8 +507,13 @@ function changeTrack(delta) {
   let i = trackIndex;
   for (let step = 0; step < TRACKS.length; step += 1) {
     i = (i + delta + TRACKS.length) % TRACKS.length;
-    if (i < save.unlocked) { trackIndex = i; break; }
+    if (i < save.unlocked) break;
   }
+  if (i === trackIndex || i >= save.unlocked) return;   // nothing else unlocked
+  trackIndex = i;
+  // A finished race lives on the old track's coordinates: stop stepping it
+  // under the new scenery. The next A starts a fresh race here.
+  race = null;
   syncTrackSelect();
   loadTrack(trackIndex);
   channel.audio.play('hover');
@@ -503,7 +521,7 @@ function changeTrack(delta) {
 
 function showMenu() {
   syncTrackSelect();
-  $('panel').innerHTML = `<h1>🏎️ <em>Turbo Racing</em></h1>
+  $('panel').innerHTML = `<h1>${icon('car')} <em>Turbo Racing</em></h1>
     <p>Hold the phone like a wheel and roll it to steer. Bank into a corner and
        hold <b>A</b> to drift — let go for a mini-turbo. Blue arrows are boost
        pads. Finish <b>top 3</b> to unlock the next cup.</p>
@@ -517,7 +535,8 @@ function showMenu() {
 // ── State ──────────────────────────────────────────────────────────────────
 
 let race = null;
-let started = false;
+let finishedAt = -Infinity;          // performance.now() of the last finish
+const RESTART_GUARD_MS = 1000;       // a held/bounced A must not skip the results
 let last = performance.now();
 let fps = 0; let frames = 0; let fpsMark = last;
 let countdownPulse = 0;
@@ -525,51 +544,64 @@ let toastUntil = 0;
 let resultMenuShown = false;
 
 // Failsafe: if steering ever feels backwards, I inverts it and sticks.
-let invertSteer = localStorage.getItem('senwii.racingInvert') === '1';
+let invertSteer = false;
+try { invertSteer = localStorage.getItem('senwii.racingInvert') === '1'; } catch { /* private mode */ }
 const steer = new TraySteer({ invert: invertSteer });
+
+// Grid pose of the selected track, for the menu backdrop between races.
+let preview = null;
 
 function loadTrack(index) {
   pads.length = 0;
-  // remove rival meshes
-  for (const rk of rivalKarts.values()) scene.remove(rk.group);
+  for (const rk of rivalKarts.values()) {
+    scene.remove(rk.group);
+    disposeTree(rk.group);
+  }
   rivalKarts.clear();
   buildTrack(TRACKS[index]);
   buildMinimap(TRACKS[index]);
   drawMinimap(null, performance.now());
+  preview = new Race({ trackIndex: index });
+  preview.start(0);                  // only to place the player on the grid
+}
+
+const canStart = () => !race || race.state === 'finished';
+function pressA() {
+  if (canStart()) {
+    if (race && performance.now() - finishedAt < RESTART_GUARD_MS) return;
+    startRace();
+  } else if (race.state === 'racing') {
+    race.setDrift(true, performance.now());
+  }
 }
 
 // ── Sound design ───────────────────────────────────────────────────────────
 
 const channel = createChannel({
   room: launchData?.room,
-  onA: () => {
-    if (!started || (race && race.state === 'finished')) {
-      startRace();
-      return;
-    }
-    // non-wheel fallback: tap A starts/holds drift while running
-  },
+  // Phone A, Space/Enter (auto-repeat filtered by the channel) and a click
+  // all land here: start a race from the menu, or hop into a drift. The
+  // release comes back as button-up / keyup / pointerup below.
+  onA: pressA,
   onB: null, // default home
+  // ←/→ steer here; they must not rewrite the shared pointer sensitivity.
+  deskKeys: false,
   onCommand: (cmd) => {
     if (cmd.type === 'calibrate' || cmd.type === 'recentre') {
       steer.recentre();
       flashToast('steering centred');
     }
+    // The wheel-mode HOME button sends its own type; treat it like B.
+    if (cmd.type === 'home') goHome(channel.audio, channel.link.room);
     if (cmd.type === 'button') {
+      // (A and B never reach here: the channel routes them to onA / onB.)
       const b = cmd.button;
-      if (b === 'A') {
-        if (!started || (race && race.state === 'finished')) startRace();
-        else if (race) race.setDrift(true, performance.now());
-      } else if (b === '1') {
-        if (race) race.setBrake(true);
-      } else if (b === 'up') {
-        changeTrack(-1);
-      } else if (b === 'down') {
-        changeTrack(1);
-      }
-      // menuDirection from the crosspad (default controller profile)
-      if (cmd.menuDirection === 'up') changeTrack(-1);
-      if (cmd.menuDirection === 'down') changeTrack(1);
+      if (b === '1' && race) race.setBrake(true);
+      // One direction per press: the crosspad's on-screen direction when
+      // the phone sends it, else the physical button.
+      const dir = cmd.menuDirection || b;
+      if (dir === 'up') changeTrack(-1);
+      else if (dir === 'down') changeTrack(1);
     }
     if (cmd.type === 'button-up') {
       const b = cmd.button;
@@ -578,7 +610,8 @@ const channel = createChannel({
     }
   },
   onSample: (sample, dt, now) => {
-    if (race) race.setSteer(steer.update(axesFromSample(sample), dt, now));
+    const deg = steer.update(axesFromSample(sample), dt, now, channel.pointer.bodyRate);
+    if (race) race.setSteer(deg);
   },
 });
 
@@ -652,9 +685,9 @@ function ensureRivals() {
 
 function startRace() {
   if (trackIndex >= save.unlocked) return;
-  started = true;
   resultMenuShown = false;
-  steer.recentre();
+  // Capture "straight" mid-countdown, once the player is holding the wheel.
+  steer.recentre(performance.now() + 1200);
   audio.unlock();
   startEngine();
 
@@ -673,18 +706,19 @@ function startRace() {
 const keys = {};
 window.addEventListener('keydown', (e) => {
   keys[e.key] = true;
+  if (e.key.startsWith('Arrow')) e.preventDefault();
+  // Space/Enter press → channel → onA (pressA). Everything below is a
+  // one-shot action, so auto-repeat is "still holding", not a new press.
+  if (e.repeat) return;
   const k = e.key.toLowerCase();
-  if (e.key === 'ArrowUp') { e.preventDefault(); changeTrack(-1); }
-  if (e.key === 'ArrowDown') { e.preventDefault(); changeTrack(1); }
-  if (e.key === ' ' || e.key === 'Enter') {
-    e.preventDefault();
-    if (!started || (race && race.state === 'finished')) startRace();
-    else if (race) race.setDrift(true, performance.now());
-  }
+  if (e.key === 'ArrowUp') changeTrack(-1);
+  if (e.key === 'ArrowDown') changeTrack(1);
+  // deskKeys is off (arrows steer here), so the debug overlay lives here.
+  if (k === 'd') $('debug').classList.toggle('on');
   if (k === 'i') {
     invertSteer = !invertSteer;
     steer.setInvert(invertSteer);
-    localStorage.setItem('senwii.racingInvert', invertSteer ? '1' : '0');
+    try { localStorage.setItem('senwii.racingInvert', invertSteer ? '1' : '0'); } catch { /* private mode */ }
     flashToast(invertSteer ? 'steering inverted' : 'steering normal');
   }
   if (k === 'x' || k === '1') { if (race) race.setBrake(true); }
@@ -695,6 +729,8 @@ window.addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
   if (k === 'x' || k === '1') { if (race) race.setBrake(false); }
 });
+// A click is A (via the channel); letting go ends the drift it started.
+window.addEventListener('pointerup', () => { if (race) race.setDrift(false, performance.now()); });
 
 function flashBanner(text, ms = 1000) {
   $('banner').innerHTML = text;
@@ -738,38 +774,44 @@ function handleEvent(e) {
   } else if (e.type === 'finish') {
     audio.play(e.place <= 3 ? 'race-go' : 'fail');
     channel.feedback({ type: e.place === 1 ? 'slice' : 'miss', combo: 3 });
+    finishedAt = performance.now();
     cupPoints[race.track.order] = e.points;
     const track = race.track;
     const prevBest = save.bestLaps[track.slug];
     if (!prevBest || (e.bestLapMs && e.bestLapMs < prevBest)) {
       save.bestLaps[track.slug] = e.bestLapMs;
-      if (race.recording && race.recording.length) save.ghosts[track.slug] = race.recording;
+      // The best lap's keys, not whichever lap happened to be last.
+      if (race.bestRecording && race.bestRecording.length) save.ghosts[track.slug] = race.bestRecording;
     }
+    const wasUnlocked = save.unlocked;
     if (e.place <= PODIUM && track.order + 1 >= save.unlocked) {
       save.unlocked = Math.min(TRACKS.length, track.order + 2);
     }
     persistSave(save);
-    showResults(e);
+    showResults(e, save.unlocked > wasUnlocked);
   }
 }
 
-function showResults(e) {
+function showResults(e, newlyUnlocked) {
   const track = race.track;
   const medal = medalFor(track, e.bestLapMs);
-  const unlocked = e.place <= PODIUM && track.order + 1 < TRACKS.length
-    && save.unlocked > track.order + 1;
+  const hasNext = track.order + 1 < TRACKS.length;
+  const unlockLine = newlyUnlocked && hasNext
+    ? `Unlocked <strong>${TRACKS[track.order + 1].name}</strong>!`
+    : e.place > PODIUM && hasNext && save.unlocked <= track.order + 1
+      ? 'Finish top 3 to unlock the next cup.' : '';
   const rows = e.standings.map((s, i) => {
     const cls = s.who === 'you' ? ' class="you"' : '';
     const tag = s.who === 'you' ? 'YOU' : s.who;
-    const mark = s.done !== null ? '🏁' : `${Math.round(s.prog)}m`;
+    const mark = s.done !== null ? icon('flag') : `${Math.round(s.prog)}m`;
     return `<div${cls}>${i + 1}. ${tag}<b>${mark}</b></div>`;
   }).join('');
   const head = e.place === 1 ? 'Champion!' : e.place <= 3 ? 'Podium!' : 'Race over';
-  const medalTxt = medal ? ` · ${medal === 'gold' ? '🥇 gold' : medal === 'silver' ? '🥈 silver' : '🥉 bronze'}` : '';
-  $('panel').innerHTML = `<h1>🏁 <em>${head}</em></h1>
+  const medalTxt = medal ? ` · ${medalTag(medal)}` : '';
+  $('panel').innerHTML = `<h1>${icon('flag')} <em>${head}</em></h1>
     <p>${ordinal(e.place)} place — <strong>${e.points} pts</strong>${medalTxt}. Best lap ${fmtMs(e.bestLapMs)}.</p>
     <div class="results">${rows}</div>
-    <p>${unlocked ? `Unlocked <strong>${TRACKS[track.order + 1].name}</strong>!` : e.place > PODIUM ? 'Finish top 3 to unlock the next cup.' : ''}</p>
+    <p>${unlockLine}</p>
     <div id="tracks"></div>
     <div id="points"></div>
     <div class="cta"><strong>A</strong> race again · <strong>↑↓</strong> pick track · <strong>B</strong> menu</div>`;
@@ -786,7 +828,7 @@ function syncHud(now) {
   $('timetrial').textContent = fmtMs(race.state === 'countdown' ? 0 : race.lapMs);
   const kmh = Math.round(race.speed * 3.6);
   const boosting = now < Math.max(race.boostUntil, race.padBoostUntil);
-  $('speed').innerHTML = `${kmh}<small> km/h${boosting ? ' ⚡' : ''}</small>`;
+  $('speed').innerHTML = `${kmh}<small> km/h${boosting ? ` ${icon('bolt', 'fill')}` : ''}</small>`;
   const dw = $('driftwrap');
   if (race.drifting || race.driftTier > 0) {
     dw.classList.add('on');
@@ -927,20 +969,32 @@ function step(now, dt) {
 
   stepParticles(dt);
 
-  // Chase camera: behind and above the player, looking ahead of the motion.
-  const ahead = 1.8;
-  const back = 8.5 - Math.min(2.4, race.speed / 22);
-  const up = 4.2 + Math.min(1.2, race.speed / 40);
-  const camX = race.pos.x + Math.sin(race.motionHeading) * back;
-  const camZ = wz(race.pos.z + Math.cos(race.motionHeading) * back);
-  const targetX = race.pos.x - Math.sin(race.motionHeading) * ahead;
-  const targetZ = wz(race.pos.z - Math.cos(race.motionHeading) * ahead);
-  const lerp = 1 - Math.exp(-6.5 * dt);
-  camera.position.lerp(new THREE.Vector3(camX, up, camZ), lerp);
-  const look = new THREE.Vector3(targetX, 1.2, targetZ);
-  camera.lookAt(look);
-
+  chaseCamera(race.pos, race.motionHeading, race.speed, dt);
   drawMinimap(race, now);
+}
+
+/** Behind and above the kart, looking ahead of its motion. */
+function chaseCamera(pos, motionHeading, speed, dt) {
+  const ahead = 1.8;
+  const back = 8.5 - Math.min(2.4, speed / 22);
+  const up = 4.2 + Math.min(1.2, speed / 40);
+  const camX = pos.x + Math.sin(motionHeading) * back;
+  const camZ = wz(pos.z + Math.cos(motionHeading) * back);
+  const targetX = pos.x - Math.sin(motionHeading) * ahead;
+  const targetZ = wz(pos.z - Math.cos(motionHeading) * ahead);
+  const lerp = dt === null ? 1 : 1 - Math.exp(-6.5 * dt);
+  camera.position.lerp(new THREE.Vector3(camX, up, camZ), lerp);
+  camera.lookAt(new THREE.Vector3(targetX, 1.2, targetZ));
+}
+
+/** Menu backdrop: the player's kart parked on the selected track's grid. */
+function stepPreview(dt) {
+  if (!preview) return;
+  placeKart(playerKart, preview.pos.x, preview.pos.z, preview.heading);
+  for (const f of flames) f.visible = false;
+  ghostKart.group.visible = false;
+  if (dt) stepParticles(dt);
+  chaseCamera(preview.pos, preview.heading, 0, dt);
 }
 
 function frame(now) {
@@ -955,20 +1009,13 @@ function frame(now) {
   wheelFeedback(now);
   channel.poll(now);
 
-  // Keyboard steering fallback (and augment) when no live pointer/tilt.
-  if (!channel.pointer.live || race?.state !== 'racing') {
-    // Tilt steer comes from onSample; keyboard overrides while keys held.
-  }
   if (race) {
+    // Tilt steer arrives via onSample; held arrow keys override it. With no
+    // live phone and no key, centre — a phone that drops mid-corner must not
+    // leave the wheel locked at its last angle.
     const kSteer = (keys.ArrowRight ? 24 : 0) + (keys.ArrowLeft ? -24 : 0);
-    if (kSteer) {
-      keys._steered = true;
-      race.setSteer(kSteer);
-    } else if (keys._steered && !channel.pointer.live) {
-      // ease back to centre when keys released and no phone
-      race.setSteer(0);
-      keys._steered = false;
-    }
+    if (kSteer) race.setSteer(kSteer);
+    else if (!channel.pointer.live) race.setSteer(0);
     // Between rounds the phone rests however: keep steer idle so the next
     // race captures from rest.
     steer.idle = race.state !== 'racing' && race.state !== 'countdown';
@@ -992,6 +1039,7 @@ function frame(now) {
     syncHud(now);
   } else {
     steer.idle = true;
+    stepPreview(dt);
   }
 
   const w = window.innerWidth; const h = window.innerHeight;
@@ -1003,8 +1051,10 @@ function frame(now) {
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
+hydrateIcons();
 loadTrack(trackIndex);
 syncTrackSelect();
+if (preview) stepPreview(null);       // snap the camera, no glide-in from origin
 if (launchData && launchData.splash) {
   launchData.splash.addEventListener('animationend', () => launchData.splash.remove(), { once: true });
 }

@@ -126,6 +126,23 @@ export class Pointer {
     this.emaRate = { x: 0, y: 0 };         // smoothed screen-rate for the lead
     this.emaAbsDps = 0;                    // smoothed |rate|, gates the ramp
 
+    // ── Precision mode ──
+    // Slow, careful hand motion moves the cursor at `precisionGain` of the
+    // normal speed, rising smoothly to full speed by `precisionFastDps`. Fine
+    // aim gets finer and tremor shrinks with it; real swings are untouched.
+    // The motion it holds back is credited to the pose reference, so pose
+    // healing never "repays" it and the cursor can't creep afterwards.
+    this.precision = options.precision ?? true;
+    this.precisionGain = options.precisionGain ?? 0.5;
+    this.precisionSlowDps = options.precisionSlowDps ?? 3;
+    this.precisionFastDps = options.precisionFastDps ?? 24;
+    this.emaSpeedDps = 0;                  // smoothed aim speed driving the gain
+    this.cursorDps = { yaw: 0, pitch: 0 }; // rates actually applied to the cursor
+
+    // Learned-gyro body rates (deg/s, body frame) for tilt games, or null
+    // until the axis map has proven itself. See core/tilt.js.
+    this.bodyRate = null;
+
     // ── Pose anchoring ──
     // The cursor state is a pair of angular offsets (degrees) from the pose
     // captured at recentre, not a raw screen position. Two consequences:
@@ -167,6 +184,12 @@ export class Pointer {
     // 1Hz), which is exactly the kind of self-inflicted mismatch this file
     // keeps having to learn about.
     this.emaM = { x: 0, y: 0, z: 0 };
+    // The (delayed) reported gyro through the SAME smoothing as emaO. The map
+    // is fitted against smoothed truth, so it must see smoothed reports too:
+    // fitting raw reports against low-passed truth biased every learned
+    // scale low by the filter's own attenuation, 10-20% depending on how
+    // fast the hand moved — a cursor that was slightly slow, inconsistently.
+    this.emaRd = [0, 0, 0];
     this.resBad = 0;
     this.resAll = 0;
     this.gyroTrusted = false;
@@ -203,6 +226,7 @@ export class Pointer {
     this.pos.y = 0.5;
     this.rate.x = 0;
     this.rate.y = 0;
+    this.cursorDps = { yaw: 0, pitch: 0 };
     this.yawOffDeg = 0;
     this.pitchOffDeg = 0;
     this.refAz = null;      // re-captured from the next packet's attitude
@@ -240,6 +264,19 @@ export class Pointer {
     this.lastSeen = now;
     if (dt > 0 && dt < 0.1) this.emaPacketDt += (dt - this.emaPacketDt) * 0.1;
 
+    // Everything below runs on the PHONE's clock. `dt` above is measured from
+    // packet arrivals, and Wi-Fi delivers in bunches: three packets 1ms apart
+    // after a 50ms stall. Rates computed against those intervals (the ground
+    // truth, the map learning, every filter) come out several percent off,
+    // and that error is what the learned gyro scale then inherits. The send
+    // time the phone stamps on every packet gives the true interval.
+    if (Number.isFinite(sample.t)) {
+      const phoneDt = this.prevPhoneT === undefined ? NaN : (sample.t - this.prevPhoneT) / 1000;
+      this.prevPhoneT = sample.t;
+      if (phoneDt > 0 && phoneDt < 0.1) dt = phoneDt;
+      else if (phoneDt === 0) dt = 0;
+    }
+
     // ── Ground-truth body rates from the attitude itself ──
     let omegaTrue = { x: 0, y: 0, z: 0 };
     if (this.prevAxes && dt > 0 && dt < 0.1) {
@@ -255,6 +292,26 @@ export class Pointer {
     const r = m ? [m.rx || 0, m.ry || 0, m.rz || 0] : null;
     if (r && (r[0] || r[1] || r[2])) this.hasGyro = true;
 
+    // ── Exact interval from the phone's own gyro integrals ──
+    // The phone accumulates every sensor event on its sensor clock and sends
+    // the running totals (ix/iy/iz over `it` seconds). The difference between
+    // two packets is exactly the rotation between them, however the network
+    // spaced, bunched or delayed them. rMean is that interval's mean rate and
+    // sensorDt its true duration; both are null on older controller pages.
+    let rMean = null;
+    let sensorDt = 0;
+    if (m && Number.isFinite(m.it)) {
+      const prev = this.prevInt;
+      this.prevInt = { x: m.ix, y: m.iy, z: m.iz, t: m.it };
+      const dS = prev ? m.it - prev.t : 0;
+      if (dS > 0 && dS < 0.25) {
+        sensorDt = dS;
+        rMean = [(m.ix - prev.x) / dS, (m.iy - prev.y) / dS, (m.iz - prev.z) / dS];
+      } else if (prev && dS === 0) {
+        sensorDt = -1;                     // no new gyro data in this packet
+      }
+    }
+
     // ── Learn the device's axis map ──
     if (r && this.hasGyro && dt > 0 && dt < 0.1) {
       // Compare against reported samples from ~50ms ago so the orientation
@@ -264,15 +321,20 @@ export class Pointer {
       while (this.ring.length > delaySlots + 1) this.ring.shift();
       const rDel = this.ring[0];
 
+      if (rDel) {
+        const kR = clamp(dt / this.emaTau, 0, 1);
+        for (let j = 0; j < 3; j += 1) this.emaRd[j] += (rDel[j] - this.emaRd[j]) * kR;
+      }
+      const rSm = this.emaRd;
       const moving = length(this.emaO) > 10;   // deg/s of smoothed real motion
       if (moving && rDel) {
         const decay = Math.exp(-dt / 30);
         const t = [this.emaO.x, this.emaO.y, this.emaO.z];
         for (let i = 0; i < 3; i += 1) {
           this.absO[i] = this.absO[i] * decay + Math.abs(t[i]) * dt;
-          this.absR[i] = this.absR[i] * decay + Math.abs(rDel[i]) * dt;
+          this.absR[i] = this.absR[i] * decay + Math.abs(rSm[i]) * dt;
           for (let j = 0; j < 3; j += 1) {
-            this.C[i][j] = this.C[i][j] * decay + t[i] * rDel[j] * dt;
+            this.C[i][j] = this.C[i][j] * decay + t[i] * rSm[j] * dt;
           }
         }
 
@@ -353,8 +415,17 @@ export class Pointer {
     // ── Live body rates: learned gyro if trusted, ground truth otherwise ──
     let omega;
     let deadzone;
+    // Tilt games only need the axes they actually move, so they may use the
+    // map as soon as its predictions match reality, even before both pointer
+    // axes are claimed (rolling a tray never exercises yaw). An unclaimed
+    // axis reads 0, which can only shrink a tilt game's gyro boost, never
+    // flip it.
+    const mapProven = this.hasGyro && r && this.map.some(Boolean)
+      && this.resAll > 1 && this.resBad / this.resAll < 0.6;
+    this.bodyRate = mapProven ? this.applyMap(rMean || r) : null;
+
     if (this.gyroTrusted && r) {
-      omega = this.applyMap(r);
+      omega = this.applyMap(rMean || r);
       deadzone = this.deadzoneDps;
     } else {
       omega = this.emaO;
@@ -393,6 +464,26 @@ export class Pointer {
     if (Math.abs(yawDps) < deadzone) yawDps = 0;
     if (Math.abs(pitchDps) < deadzone) pitchDps = 0;
     this.rateDps = { yaw: yawDps, pitch: pitchDps };
+
+    // ── Commit this packet's motion to the angular state ──
+    // With phone integrals and a trusted gyro this is the exact rotation over
+    // the interval (sensor clock). Otherwise the arrival interval is the best
+    // available estimate. The display only ever predicts past this point.
+    const exact = rMean && this.gyroTrusted;
+    const commitDt = exact ? sensorDt
+      : sensorDt === -1 ? 0
+        : (dt > 0 && dt < 0.1 ? dt : 0);
+    const gain = this.precisionGainFor(yawDps, pitchDps, commitDt);
+    this.cursorDps = { yaw: yawDps * gain, pitch: pitchDps * gain };
+    this.yawOffDeg += this.cursorDps.yaw * commitDt;
+    this.pitchOffDeg += this.cursorDps.pitch * commitDt;
+    // Credit the held-back motion to the pose reference (see constructor).
+    // Applied after the reference exists; a fresh anchor below absorbs it.
+    if (gain < 1 && this.refAz !== null) {
+      this.refAz += yawDps * (1 - gain) * commitDt;
+      this.refElev += pitchDps * (1 - gain) * commitDt;
+    }
+    this.clampOffsets();
 
     // ── Pose anchoring: reference capture + stillness healing ──
     // The beam's absolute azimuth/elevation in the world frame. d(az)/dt is
@@ -441,8 +532,8 @@ export class Pointer {
     // conventions — never trusted from derivation.)
     const sx = this.sensitivity * (this.invertX ? -1 : 1);
     const sy = this.sensitivity * (this.invertY ? -1 : 1);
-    this.rate.x = (-yawDps / this.degPerScreen) * sx;
-    this.rate.y = (-pitchDps / (this.degPerScreen * this.aspect)) * sy;
+    this.rate.x = (-this.cursorDps.yaw / this.degPerScreen) * sx;
+    this.rate.y = (-this.cursorDps.pitch / (this.degPerScreen * this.aspect)) * sy;
 
     // Exact one-pole kernel: dt/tau clamped saturates to 1 when tau is at or
     // under the packet interval, silently disabling the smoothing entirely.
@@ -469,10 +560,46 @@ export class Pointer {
   }
 
   /**
-   * Where to draw the cursor this frame. Integrates the current angular rate
-   * at display rate, so motion is continuous regardless of packet rate. The
-   * integrated state is angular, bounded `overshoot` screens past each edge;
-   * the visible position is the clamped view of it.
+   * Cursor gain for this packet: `precisionGain` for slow, careful motion,
+   * full speed for real moves, a smoothstep between. Driven by a lightly
+   * smoothed speed so a single noisy packet can't modulate the cursor.
+   */
+  precisionGainFor(yawDps, pitchDps, dt) {
+    const speed = Math.hypot(yawDps, pitchDps);
+    // Fast attack (moves get full speed at once), slower release (a careful
+    // approach after a flick stays precise only once the hand really slows).
+    const tau = speed > this.emaSpeedDps ? 0.015 : 0.06;
+    if (dt > 0) this.emaSpeedDps += (speed - this.emaSpeedDps) * (1 - Math.exp(-dt / tau));
+    if (!this.precision) return 1;
+    const u = clamp((this.emaSpeedDps - this.precisionSlowDps)
+      / Math.max(this.precisionFastDps - this.precisionSlowDps, 1e-6), 0, 1);
+    const smooth = u * u * (3 - 2 * u);
+    return this.precisionGain + (1 - this.precisionGain) * smooth;
+  }
+
+  /** Angular limits of the integrated state (overshoot screens past each edge). */
+  caps() {
+    const sx = this.sensitivity * (this.invertX ? -1 : 1);
+    const sy = this.sensitivity * (this.invertY ? -1 : 1);
+    return {
+      sx,
+      sy,
+      capX: ((0.5 + this.overshoot) * this.degPerScreen) / Math.max(Math.abs(sx), 1e-6),
+      capY: ((0.5 + this.overshoot) * this.degPerScreen * this.aspect) / Math.max(Math.abs(sy), 1e-6),
+    };
+  }
+
+  clampOffsets() {
+    const { capX, capY } = this.caps();
+    this.yawOffDeg = clamp(this.yawOffDeg, -capX, capX);
+    this.pitchOffDeg = clamp(this.pitchOffDeg, -capY, capY);
+  }
+
+  /**
+   * Where to draw the cursor this frame: the committed angular state plus a
+   * short, capped prediction since the last packet. The state is angular,
+   * bounded `overshoot` screens past each edge; the visible position is the
+   * clamped view of it.
    */
   sampleAt(now) {
     if (!this.lastDraw) this.lastDraw = now;
@@ -481,18 +608,19 @@ export class Pointer {
     if (!(dt > 0) || dt > 0.25) dt = 0;
 
     if (this.live && now - this.lastSeen < 250) {
-      this.yawOffDeg += this.rateDps.yaw * dt;
-      this.pitchOffDeg += this.rateDps.pitch * dt;
+      // The angular state is committed per packet (see update). Between
+      // packets, carry the motion forward at the last rate for at most a
+      // couple of packet intervals: smooth on a steady stream, bounded when
+      // Wi-Fi stalls, and replaced by the exact value when the packet lands.
+      const gap = Math.max(0, (now - this.lastSeen) / 1000);
+      const horizon = clamp(2.5 * this.emaPacketDt, 0.02, 0.06);
+      const ahead = Math.min(gap, horizon);
+      const { capX, capY, sx, sy } = this.caps();
+      const yawShown = clamp(this.yawOffDeg + this.cursorDps.yaw * ahead, -capX, capX);
+      const pitchShown = clamp(this.pitchOffDeg + this.cursorDps.pitch * ahead, -capY, capY);
 
-      const sx = this.sensitivity * (this.invertX ? -1 : 1);
-      const sy = this.sensitivity * (this.invertY ? -1 : 1);
-      const capX = ((0.5 + this.overshoot) * this.degPerScreen) / Math.max(Math.abs(sx), 1e-6);
-      const capY = ((0.5 + this.overshoot) * this.degPerScreen * this.aspect) / Math.max(Math.abs(sy), 1e-6);
-      this.yawOffDeg = clamp(this.yawOffDeg, -capX, capX);
-      this.pitchOffDeg = clamp(this.pitchOffDeg, -capY, capY);
-
-      this.pos.x = clamp(0.5 - (this.yawOffDeg * sx) / this.degPerScreen, 0, 1);
-      this.pos.y = clamp(0.5 - (this.pitchOffDeg * sy) / (this.degPerScreen * this.aspect), 0, 1);
+      this.pos.x = clamp(0.5 - (yawShown * sx) / this.degPerScreen, 0, 1);
+      this.pos.y = clamp(0.5 - (pitchShown * sy) / (this.degPerScreen * this.aspect), 0, 1);
 
       // Dead reckoning, display-only: the drawn cursor runs ahead of the
       // integrated state by the pipeline's own latency (packet cadence plus
