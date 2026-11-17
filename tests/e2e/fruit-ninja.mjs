@@ -7,12 +7,22 @@ const browser = await launchBrowser();
 // A fast horizontal slash sweeping across the phone's aim, as a stream.
 const SLASH = `(t) => ({ alpha: 0, beta: 90, gamma: 25 * Math.sin(t * 9) })`;
 const VIEW = { width: 960, height: 540 };   // software GL is slow: keep frames small
-const open = (page, ...a) => openGame(browser, srv, 'fruit-ninja', { viewport: VIEW, ...(a[0] || {}) });
+// Opens the game and, unless asked to stay in the lobby, says "go" like a player would.
+const open = async (_unused, opts = {}) => {
+  const { lobby = false, ...rest } = opts;
+  const page = await openGame(browser, srv, 'fruit-ninja', { viewport: VIEW, ...rest });
+  if (!lobby) {
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => window.__senwii.lobby === false);
+  }
+  return page;
+};
 
 // Slash across a cell with the real mouse (drives slot 0 whenever its phone isn't streaming).
 async function mouseSlash(page, cell, until) {
-  for (let i = 0; i < 80; i += 1) {
+  for (let i = 0; i < 400; i += 1) {
     if (await page.evaluate(until)) return true;
+    await sleep(40);        // fruit arrives on its own schedule; don't burn the attempts before it exists
     const y = cell[1] + cell[3] * (0.25 + 0.5 * ((i * 0.37) % 1));
     await page.mouse.move(cell[0] + 6, y);
     for (let k = 1; k <= 6; k += 1) await page.mouse.move(cell[0] + (cell[2] - 12) * (k / 6), y + (i % 2 ? 20 : -20) * (k / 6));
@@ -29,6 +39,52 @@ const state = (page) => page.evaluate(() => {
 });
 
 try {
+  await t.test('lobby: nothing is thrown until someone says go (unattended page never loses)', async () => {
+    const page = await open(null, { lobby: true });
+    await sleep(4500);
+    const s = await page.evaluate(() => ({
+      lobby: window.__senwii.lobby, phase: window.__senwii.match.phase,
+      fruit: window.__senwii.match.slots.reduce((n, k) => n + window.__senwii.match.board(k).fruits.length, 0),
+      lives: window.__senwii.match.board(0).state.lives,
+      overlay: !document.getElementById('overlay').classList.contains('hide'),
+      text: document.getElementById('panel').innerText,
+    }));
+    t.eq([s.lobby, s.phase, s.fruit, s.lives, s.overlay], [true, 'playing', 0, 3, true]);
+    t.ok(/to start/.test(s.text), s.text);
+    await shot(page, 'fn-lobby');
+    await page.keyboard.press('Space');
+    await t.waitFor(page, () => window.__senwii.lobby === false && !window.__senwii.match.board(0).fruits.length === false || window.__senwii.match.board(0).fruits.length > 0, null, 15000);
+    t.ok(await page.locator('#overlay.hide').count() === 1, 'overlay gone');
+    await page.context().close();
+  });
+
+  await t.test('lobby: A on a phone starts it, and the roster shows who is connected', async () => {
+    const page = await open(null, { lobby: true });
+    const a = await Phone.join(browser, srv, await roomOf(page));
+    const b = await Phone.join(browser, srv, await roomOf(page));
+    await t.waitFor(page, () => window.__senwii.match.slots.length === 2);
+    const text = await page.locator('#panel').innerText();
+    t.ok(/P1/.test(text) && /P2/.test(text), `roster: ${text}`);
+    t.eq(await page.evaluate(() => window.__senwii.lobby), true, 'still waiting');
+    await b.press('A');
+    await t.waitFor(page, () => window.__senwii.lobby === false);
+    await t.waitFor(page, () => window.__senwii.match.slots.some((k) => window.__senwii.match.board(k).fruits.length > 0), null, 20000);
+    await a.close(); await b.close(); await page.context().close();
+  });
+
+  await t.test('lobby: arriving from the launcher with a phone paired auto-starts', async () => {
+    const page = await open(null, {
+      lobby: true,
+      initScript: `sessionStorage.setItem('senwii.launch', JSON.stringify({ slug: 'fruit-ninja', title: 'Fruit Ninja', icon: 'fruit', c0: '#000', c1: '#222', room: 'LOBBY1', t: Date.now() }));`,
+    });
+    t.eq(await roomOf(page), 'LOBBY1', 'reclaimed the launcher room');
+    const a = await Phone.join(browser, srv, 'LOBBY1');
+    await t.waitFor(page, () => window.__senwii.link.slots[0]?.occupied === true);
+    t.eq(await page.evaluate(() => window.__senwii.lobby), true, 'grace period first');
+    await t.waitFor(page, () => window.__senwii.lobby === false, null, 10000);
+    await a.close(); await page.context().close();
+  });
+
   await t.test('solo: starts, uses real rules (3 lives), one full-screen cell', async () => {
     const page = await open(null);
     await sleep(500);

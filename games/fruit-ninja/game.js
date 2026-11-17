@@ -1010,6 +1010,46 @@ function recentreSlot(slot) {
   flash(link.controllers > 1 ? `P${slot + 1} re-centred` : 're-centred');
 }
 
+// ── Lobby ──────────────────────────────────────────────────────────────────
+// The first round waits for someone to say go (A on any phone, Space, or a
+// click) instead of throwing fruit at an empty room: friends scanning the QR
+// code take a while to connect, and an unattended round used to be over before
+// they arrived. Fruit is held back, boards and phones are live. Arriving from
+// the launcher with a phone already paired auto-starts after a short grace
+// (restarted by every new arrival), so the common case stays one tap.
+let lobby = true;
+let lobbyTimer = 0;
+const AUTO_START_MS = 3000;
+
+function renderLobby() {
+  if (!lobby) return;
+  const occupied = occupiedSlots();
+  const roster = occupied.length
+    ? occupied.map((slot) => `<span class="pdot" style="background:${cssTint(slot)}"></span>P${slot + 1}`).join(' &nbsp; ')
+    : '<span style="font-size:16px;font-family:inherit;color:#b39468">no remote connected — mouse &amp; keyboard work too</span>';
+  const auto = launchData?.room && occupied.length ? ' · starting…' : '';
+  showOverlay(`<h1>Fruit <em>Ninja</em></h1>
+    <p>Three lives each. Bombs end your run. Last one standing with the top score wins.</p>
+    <div style="font-family:'Permanent Marker',cursive;font-size:24px;margin:4px 0 8px;text-align:center">${roster}</div>
+    <div class="cta"><strong>A</strong> / <strong>Space</strong> / click to start${auto}</div>`);
+}
+
+function leaveLobby() {
+  if (!lobby) return;
+  lobby = false;
+  clearTimeout(lobbyTimer);
+  hideOverlay();
+  const at = performance.now() + 1200;
+  for (const b of match.boards.values()) b.state.nextSpawn = at;
+}
+
+function armAutoStart() {
+  clearTimeout(lobbyTimer);
+  if (lobby && launchData?.room && occupiedSlots().length > 0) {
+    lobbyTimer = setTimeout(leaveLobby, AUTO_START_MS);
+  }
+}
+
 // ── Who is playing ─────────────────────────────────────────────────────────
 // deskMode: no phone has ever been seen this round, so slot 0 is the
 // mouse/keyboard player. The moment a phone appears the board belongs to it.
@@ -1025,7 +1065,7 @@ function syncParticipants() {
   if (deskMode && occupied.length > 0) {
     deskMode = false;
     // The only connected phone isn't slot 0: the desk board was a placeholder.
-    if (!occupied.includes(0)) { startGame({ keepDelay: true }); return; }
+    if (!occupied.includes(0)) { startGame(); return; }
   }
   if (!deskMode) {
     for (const slot of occupied) {
@@ -1040,6 +1080,12 @@ function syncParticipants() {
   }
   layoutCells();
   syncHud();
+}
+
+function onRosterChange() {
+  syncParticipants();
+  renderLobby();
+  armAutoStart();
 }
 
 const link = new GameLink({
@@ -1068,7 +1114,7 @@ const link = new GameLink({
   onPresence: (p) => {
     $('dot').classList.toggle('on', p.controller > 0);
     syncLinkLabel();
-    syncParticipants();
+    onRosterChange();
   },
 });
 
@@ -1223,20 +1269,19 @@ function syncHud() {
   }
 }
 
-function startGame({ keepDelay = false } = {}) {
-  hideOverlay();
+function startGame() {
+  if (!lobby) hideOverlay();
   clearSplats();
   const occupied = occupiedSlots();
   deskMode = occupied.length === 0;
-  const first = !keepDelay ? 900 : 0;
   match.start(occupied, performance.now());
   layoutCells();
-  void first;
   syncHud();
 }
 
 function beginPlay() {
   audio.unlock();
+  if (lobby) { leaveLobby(); return; }
   if (match.phase === 'playing') return;
   if (performance.now() - finishedAt < RESTART_GUARD_MS) return;
   startGame();
@@ -1332,6 +1377,7 @@ function frame(now) {
     }
   }
 
+  if (lobby) for (const b of match.boards.values()) b.state.nextSpawn = Infinity;
   match.update(now, dt);
   syncScene(now);
 
@@ -1347,7 +1393,7 @@ window.addEventListener('mousemove', (e) => {
   mouse.y = e.clientY / window.innerHeight;
   mouse.active = true;
 });
-window.addEventListener('pointerdown', () => audio.unlock());
+window.addEventListener('pointerdown', () => { audio.unlock(); if (lobby) leaveLobby(); });
 
 // Keyboard/desk fallback always addresses slot 0 — the one guaranteed input.
 window.addEventListener('keydown', (e) => {
@@ -1400,14 +1446,11 @@ resize();
 // channel tile, the browser carries that gesture across the navigation and
 // this succeeds — sound works without ever touching the PC again.
 audio.unlock();
-// Straight into play — no lobby. Called here at the bottom of the module:
-// startGame touches const helpers that are in the temporal dead zone until
-// the whole module has evaluated. Phones already in the room arrive via
-// presence a moment later and take their boards (see syncParticipants).
+// Boards exist from the first frame, but the first fruit waits in the lobby
+// (see above). startGame touches const helpers that are in the temporal dead
+// zone until the whole module has evaluated, hence calling it down here.
 startGame();
-// Hold the first fruit until the launch splash has fully faded: its throw
-// whoosh under the loading banner read as a stray leftover menu sound.
-for (const b of match.boards.values()) b.state.nextSpawn = performance.now() + 1800;
+renderLobby();
 requestAnimationFrame(frame);
 
 // Exposed for the verification harness / e2e tests. `game` is the first
@@ -1418,6 +1461,7 @@ window.__senwii = {
   get game() { return match.board(match.slots[0]); },
   get pointer() { return inputFor(0).pointer; },
   scene, renderer, meshes, splats, visuals,
+  get lobby() { return lobby; },
   syncScene, drawTrail, pruneMeshes, layoutCells, startGame, beginPlay,
   fps: () => fps,
 };

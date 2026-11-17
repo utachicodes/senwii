@@ -60,8 +60,9 @@ export function launchBrowser() {
 }
 
 /** Open a game page and wait until it has registered with the relay. Errors are collected on page.errors. */
-export async function openGame(browser, srv, slug, { query = '', viewport = { width: 1280, height: 720 } } = {}) {
+export async function openGame(browser, srv, slug, { query = '', viewport = { width: 1280, height: 720 }, initScript = null } = {}) {
   const ctx = await browser.newContext({ viewport, ignoreHTTPSErrors: true });
+  if (initScript) await ctx.addInitScript(initScript);
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', (e) => page.errors.push(String(e)));
