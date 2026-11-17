@@ -7,7 +7,7 @@ import {
   Race, TOP_SPEED, GRASS_SPEED, BOOST_SPEED, BOOST_PAD_MS, DRIFT_CHARGE_T1,
   DRIFT_CHARGE_T2, DRIFT_CHARGE_T3, BOOST_T, POINTS, RACER_COUNT,
   CHECKPOINT_COUNT, SAMPLES, KART_RADIUS, GRID_ROW_M, WALL_MARGIN,
-  OFFROAD_RESCUE_MS,
+  OFFROAD_RESCUE_MS, FINISH_GRACE_MS, MAX_HUMANS,
 } from './logic.js';
 
 const DT = 1 / 60;
@@ -517,4 +517,243 @@ test('loadSave survives a missing localStorage (Node)', () => {
   assert.equal(save.unlocked, 1);
   assert.deepEqual(save.bestLaps, {});
   assert.deepEqual(save.ghosts, {});
+});
+
+// ── Multiplayer: several humans on one grid ─────────────────────────────────
+
+/** The same pure-pursuit autopilot, aimed at one car. */
+function driveCar(race, i, { lookahead = 28, gain = 250 } = {}) {
+  const car = race.cars[i];
+  const tA = tAtS(race.track, car.progressM + lookahead);
+  const c = trackCenterAt(race.track, tA);
+  const want = Math.atan2(-(c.x - car.pos.x), -(c.z - car.pos.z));
+  let err = want - car.heading;
+  while (err > Math.PI) err -= TAU;
+  while (err < -Math.PI) err += TAU;
+  race.setSteer(Math.max(-30, Math.min(30, err * gain)), i);
+}
+
+/** Step a multiplayer race; `drivers` says which cars get the autopilot. */
+function runMulti(race, { drivers = null, untilMs = 600000, stop = null } = {}) {
+  let now = 0;
+  race.start(now);
+  while (now < untilMs) {
+    now += DT * 1000;
+    for (let i = 0; i < race.cars.length; i += 1) {
+      if (!drivers || drivers.includes(i)) driveCar(race, i);
+    }
+    race.update(now, DT);
+    if (race.state === 'finished' || (stop && stop(race, now))) break;
+  }
+  return now;
+}
+
+test('multiplayer: humans fill the back of the grid, CPUs the rest', () => {
+  for (let n = 1; n <= MAX_HUMANS; n += 1) {
+    const race = new Race({ trackIndex: 0, seed: 7, humans: n });
+    race.start(0);
+    assert.equal(race.cars.length, n);
+    assert.equal(race.karts.length, RACER_COUNT - n);
+    const spots = [
+      ...race.cars.map((c) => ({ x: c.pos.x, z: c.pos.z })),
+      ...race.karts.map((k) => race.kartWorldPos(k)),
+    ];
+    assert.equal(spots.length, RACER_COUNT);
+    for (let i = 0; i < spots.length; i += 1) {
+      for (let j = i + 1; j < spots.length; j += 1) {
+        const d = Math.hypot(spots[i].x - spots[j].x, spots[i].z - spots[j].z);
+        assert.ok(d > KART_RADIUS * 1.5, `n=${n}: grid spots ${i}/${j} are ${d.toFixed(2)}m apart`);
+      }
+    }
+    // Every human starts behind every CPU kart.
+    const frontHuman = Math.max(...race.cars.map((c) => c.progressM));
+    const backCpu = Math.min(...race.karts.map((k) => k.progressM));
+    assert.ok(frontHuman <= backCpu + 1e-9, `n=${n}: humans start behind the CPUs`);
+  }
+});
+
+test('multiplayer: humans is clamped to 1..4', () => {
+  assert.equal(new Race({ humans: 0 }).cars.length, 1);
+  assert.equal(new Race({ humans: 9 }).cars.length, MAX_HUMANS);
+  assert.equal(new Race({ humans: 'x' }).cars.length, 1);
+});
+
+test('multiplayer: standings name humans P1..Pn, solo stays "you"', () => {
+  const solo = new Race({ trackIndex: 0 });
+  assert.ok(solo.standings().some((e) => e.who === 'you'));
+  const duo = new Race({ trackIndex: 0, humans: 2 });
+  const who = duo.standings().map((e) => e.who);
+  assert.ok(who.includes('P1') && who.includes('P2') && !who.includes('you'));
+  assert.deepEqual(duo.standings().filter((e) => e.car !== undefined).map((e) => e.car).sort(), [0, 1]);
+});
+
+test('multiplayer: 2, 3 and 4 humans all finish with unique, consistent places', () => {
+  for (const n of [2, 3, 4]) {
+    const ev = [];
+    const race = new Race({ trackIndex: 0, seed: 11, humans: n, onEvent: (e) => ev.push(e) });
+    runMulti(race);
+    assert.equal(race.state, 'finished', `n=${n} race ends`);
+    const fins = ev.filter((e) => e.type === 'finish');
+    assert.equal(fins.length, n, `n=${n}: one finish event per human`);
+    assert.deepEqual(fins.map((f) => f.car).sort(), [...Array(n).keys()]);
+    const places = fins.map((f) => f.place);
+    assert.equal(new Set(places).size, n, `n=${n}: places are unique (${places})`);
+    for (const f of fins) {
+      assert.ok(f.place >= 1 && f.place <= RACER_COUNT);
+      assert.equal(f.points, POINTS[f.place - 1]);
+      assert.ok(!f.dnf);
+      assert.equal(f.standings.length, RACER_COUNT);
+    }
+    const over = ev.filter((e) => e.type === 'raceover');
+    assert.equal(over.length, 1, 'raceover fires exactly once');
+    // The final standings agree with every per-car place.
+    for (const f of fins) {
+      assert.equal(over[0].standings.findIndex((e) => e.car === f.car) + 1, f.place);
+    }
+    // Finishing order of the finish events is the order of the places.
+    for (let i = 1; i < fins.length; i += 1) assert.ok(fins[i].place > fins[i - 1].place);
+  }
+});
+
+test('multiplayer: events carry the car that caused them', () => {
+  const ev = [];
+  const race = new Race({ trackIndex: 0, seed: 3, humans: 2, onEvent: (e) => ev.push(e) });
+  runMulti(race);
+  const laps = ev.filter((e) => e.type === 'lap');
+  assert.equal(laps.length, race.laps * 2);
+  for (const car of [0, 1]) assert.equal(laps.filter((e) => e.car === car).length, race.laps);
+});
+
+test('multiplayer: each car steers independently', () => {
+  const race = new Race({ trackIndex: 0, seed: 5, humans: 2 });
+  race.start(0);
+  race.update(COUNTDOWN_T(), DT);   // → racing
+  race.setSteer(20, 0);
+  race.setSteer(-20, 1);
+  assert.equal(race.cars[0].steer, 20);
+  assert.equal(race.cars[1].steer, -20);
+  assert.equal(race.steer, 20, 'legacy accessor reads car 0');
+  let now = COUNTDOWN_T();
+  for (let i = 0; i < 90; i += 1) { now += DT * 1000; race.update(now, DT); }
+  assert.ok(race.cars[0].heading !== race.cars[1].heading);
+  assert.ok(Math.sign(race.cars[0].heading) !== Math.sign(race.cars[1].heading));
+});
+function COUNTDOWN_T() { return 3000; }
+
+test('multiplayer: drift and brake are per car', () => {
+  const race = new Race({ trackIndex: 0, seed: 5, humans: 2 });
+  race.start(0);
+  let now = 3000;
+  race.update(now, DT);
+  for (let i = 0; i < 120; i += 1) { now += DT * 1000; race.update(now, DT); }
+  race.setSteer(25, 0);
+  race.setSteer(25, 1);
+  race.setDrift(true, now, 0);
+  race.setBrake(true, 1);
+  assert.equal(race.cars[0].drifting, true);
+  assert.equal(race.cars[1].drifting, false);
+  assert.equal(race.cars[1].brakeHeld, true);
+  assert.equal(race.cars[0].brakeHeld, false);
+});
+
+test('multiplayer: cars shove each other apart instead of overlapping', () => {
+  const race = new Race({ trackIndex: 0, seed: 5, humans: 2 });
+  race.start(0);
+  const a = race.cars[0];
+  const b = race.cars[1];
+  b.pos.x = a.pos.x + 0.2;
+  b.pos.z = a.pos.z;
+  race.separateKarts();
+  assert.ok(Math.hypot(a.pos.x - b.pos.x, a.pos.z - b.pos.z) >= KART_RADIUS * 2 - 1e-6);
+  // Exactly stacked still resolves (no NaN, no zero-division).
+  b.pos.x = a.pos.x;
+  b.pos.z = a.pos.z;
+  race.separateKarts();
+  assert.ok(Number.isFinite(a.pos.x + b.pos.x + a.pos.z + b.pos.z));
+  assert.ok(Math.hypot(a.pos.x - b.pos.x, a.pos.z - b.pos.z) >= KART_RADIUS * 2 - 1e-6);
+});
+
+test('multiplayer: a straggler is classified DNF once the grace window ends', () => {
+  const ev = [];
+  const race = new Race({ trackIndex: 0, seed: 7, humans: 2, onEvent: (e) => ev.push(e) });
+  // Only car 0 is driven; car 1 sits still on the grid with the throttle held
+  // straight into the road — it never finishes.
+  let finishedAt = null;
+  const end = runMulti(race, {
+    drivers: [0],
+    stop: (r, now) => { if (r.cars[0].finishedMs !== null && finishedAt === null) finishedAt = now; return false; },
+  });
+  assert.equal(race.state, 'finished');
+  assert.ok(finishedAt !== null);
+  assert.ok(end - finishedAt >= FINISH_GRACE_MS - 100, 'waited the grace window');
+  assert.ok(end - finishedAt <= FINISH_GRACE_MS + 500, 'and not much longer');
+  const fins = ev.filter((e) => e.type === 'finish');
+  assert.equal(fins.length, 2);
+  assert.equal(fins.find((f) => f.car === 0).dnf, false);
+  const dnf = fins.find((f) => f.car === 1);
+  assert.equal(dnf.dnf, true);
+  assert.ok(dnf.place > fins.find((f) => f.car === 0).place);
+  assert.equal(ev.filter((e) => e.type === 'raceover').length, 1);
+  assert.equal(race.cars[1].dnf, true);
+});
+
+test('multiplayer: a dropped car stops counting, and the race can end without it', () => {
+  const ev = [];
+  const race = new Race({ trackIndex: 0, seed: 7, humans: 3, onEvent: (e) => ev.push(e) });
+  let dropped = false;
+  runMulti(race, {
+    drivers: [0, 1, 2],
+    stop: (r, now) => {
+      if (!dropped && now > 5000) { r.dropCar(2, now); dropped = true; }
+      return false;
+    },
+  });
+  assert.equal(race.state, 'finished');
+  assert.ok(ev.some((e) => e.type === 'dropout' && e.car === 2));
+  assert.equal(ev.filter((e) => e.type === 'finish').length, 2, 'only connected humans finish');
+  assert.equal(race.cars[2].out, true);
+  assert.equal(race.cars[2].finishedMs, null);
+  // The dropped car doesn't hold the race open for the grace window.
+  const lastFinish = Math.max(race.cars[0].finishedMs, race.cars[1].finishedMs);
+  assert.ok(lastFinish > 0);
+  // Dropping twice is a no-op.
+  const before = ev.length;
+  race.dropCar(2, 1);
+  assert.equal(ev.length, before);
+});
+
+test('multiplayer: everyone leaving ends the race', () => {
+  const ev = [];
+  const race = new Race({ trackIndex: 0, seed: 7, humans: 2, onEvent: (e) => ev.push(e) });
+  race.start(0);
+  race.update(3000, DT);
+  race.update(3016, DT);
+  race.dropCar(0, 3016);
+  assert.equal(race.state, 'racing');
+  race.dropCar(1, 3016);
+  assert.equal(race.state, 'finished');
+  assert.equal(ev.filter((e) => e.type === 'raceover').length, 1);
+});
+
+test('multiplayer: CPU rubber band follows the mean of the humans', () => {
+  const race = new Race({ trackIndex: 0, seed: 7, humans: 2 });
+  race.start(0);
+  race.cars[0].progressM = 100;
+  race.cars[1].progressM = 300;
+  assert.equal(race.humanProgress(), 200);
+  race.cars[0].finishedMs = 1;
+  assert.equal(race.humanProgress(), 300, 'finished humans no longer drag the average');
+});
+
+test('multiplayer: no ghost when more than one human races', () => {
+  const g = [{ ms: 0, x: 0, z: 0, h: 0 }];
+  assert.equal(new Race({ trackIndex: 0, humans: 2, ghost: g }).ghost, null);
+  assert.equal(new Race({ trackIndex: 0, humans: 1, ghost: g }).ghost, g);
+});
+
+test('single player: still one car, five rivals, identical grid slot', () => {
+  const race = new Race({ trackIndex: 0, seed: 7 });
+  assert.equal(race.cars.length, 1);
+  assert.equal(race.karts.length, RACER_COUNT - 1);
+  assert.equal(race.cars[0].gridSlot, RACER_COUNT - 1);
 });

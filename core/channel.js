@@ -18,6 +18,7 @@ export function createChannel({
   onA = () => {},
   onB = null,               // default: HOME chime + fade back to the menu
   onCommand = () => {},
+  onPresenceChange = () => {},   // (presence) — who's connected, per slot
   onSample = null,          // (sample, dt, now) — raw attitude for tilt games
   room = null,              // reclaim the menu's relay room (see core/splash.js)
   deskKeys = true,          // ←/→ sensitivity + D debug; off for games that play on those keys
@@ -31,10 +32,40 @@ export function createChannel({
   let lastPhoneT = null;
   let lastSample = null;
 
+  // Per-phone pointers, for games that give each player their own input
+  // (split-screen racing). Created on demand by `pointerFor(slot)`; a game
+  // that never calls it pays nothing and keeps the single shared `pointer`.
+  const slotPointers = new Map();   // slot → { pointer, lastAt, lastPhoneT }
+  function pointerFor(slot) {
+    let sp = slotPointers.get(slot);
+    if (!sp) {
+      const p = new Pointer({});
+      p.sensitivity = pointer.sensitivity;
+      sp = { pointer: p, lastAt: 0, lastPhoneT: null };
+      slotPointers.set(slot, sp);
+    }
+    return sp.pointer;
+  }
+
   const link = new GameLink({
     room,
-    onOrientation: (sample) => {
+    onOrientation: (sample, slot = 0) => {
       const now = performance.now();
+      const sp = slotPointers.get(slot);
+      if (sp) {
+        let sdt = sp.lastAt ? clamp((now - sp.lastAt) / 1000, 1 / 240, 0.1) : 1 / 60;
+        sp.lastAt = now;
+        if (Number.isFinite(sample.t)) {
+          const phoneDt = sp.lastPhoneT === null ? NaN : (sample.t - sp.lastPhoneT) / 1000;
+          sp.lastPhoneT = sample.t;
+          if (phoneDt > 0 && phoneDt < 0.1) sdt = phoneDt;
+        }
+        sp.pointer.update(sample, sdt, now);
+        if (onSample) onSample(sample, sdt, now, slot);
+        // Per-slot games own their pointers: the shared one below stays idle
+        // for them, so two phones never fight over it.
+        return;
+      }
       let dt = lastSampleAt ? clamp((now - lastSampleAt) / 1000, 1 / 240, 0.1) : 1 / 60;
       lastSampleAt = now;
       // Prefer the phone's own send-time spacing: arrivals bunch on Wi-Fi,
@@ -46,21 +77,23 @@ export function createChannel({
       }
       lastSample = sample;
       pointer.update(sample, dt, now);
-      if (onSample) onSample(sample, dt, now);
+      if (onSample) onSample(sample, dt, now, slot);
     },
-    onCommand: (cmd) => {
-      if (cmd.type === 'button' && cmd.button === 'A') { audio.unlock(); onA(); }
+    onCommand: (cmd, slot = 0) => {
+      if (cmd.type === 'button' && cmd.button === 'A') { audio.unlock(); onA(slot); }
       else if (cmd.type === 'button' && cmd.button === 'B') (onB || (() => goHome(audio, link.room)))();
       else if (cmd.type === 'calibrate' || cmd.type === 'recentre') {
-        pointer.recentre();
-        onCommand(cmd);              // games with their own neutral re-zero too
+        (slotPointers.get(slot)?.pointer || pointer).recentre();
+        onCommand(cmd, slot);        // games with their own neutral re-zero too
       }
       else if (cmd.type === 'speed') {
         pointer.sensitivity = clamp(pointer.sensitivity * (cmd.factor || 1), 0.2, 6);
         saveSensitivity(pointer.sensitivity);
-      } else onCommand(cmd);
+      } else onCommand(cmd, slot);
     },
-    onPresence: ({ controller }) => {
+    onPresence: (presence) => {
+      const { controller } = presence;
+      onPresenceChange(presence);
       const on = controller > 0;
       const dot = $('dot');
       const label = $('link-t');
@@ -125,6 +158,7 @@ export function createChannel({
 
   return {
     pointer,
+    pointerFor,
     link,
     audio,
     mouse,

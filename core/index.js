@@ -14,3 +14,4 @@ export * from './audio.js';
 export * from './net.js';
 export * from './gesture.js';
 export * from './channel.js';
+export * from './splitscreen.js';

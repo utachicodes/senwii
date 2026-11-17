@@ -204,7 +204,13 @@ export class FruitNinja {
 
   update(now, dt) {
     this.stepDebris(dt);
-    if (this.state.phase !== 'playing') return;
+    if (this.state.phase !== 'playing') {
+      // Game over (or not started): whatever is still in the air finishes its
+      // arc and drops out of the frame — it just can't be cut or missed any
+      // more. Freezing it mid-air looked like a rendering bug.
+      this.stepFalling(dt);
+      return;
+    }
 
     if (now >= this.state.nextSpawn) {
       const roll = Math.random();
@@ -263,6 +269,7 @@ export class FruitNinja {
           } else {
             this.onEvent({ type: 'bomb', fatal: true, x: f.x, y: f.y, slot: cutBy.slot });
             this.end(now);
+            break;      // the run is over: no further cuts or misses this frame
           }
         } else {
           this.slice(f, Math.atan2(cutSeg.y2 - cutSeg.y1, cutSeg.x2 - cutSeg.x1), now);
@@ -290,7 +297,10 @@ export class FruitNinja {
         if (!f.bomb && this.state.phase === 'playing') {
           if (!this.infiniteLives) this.state.lives -= 1;
           this.onEvent({ type: 'miss', lives: this.state.lives, x: f.x });
-          if (this.state.lives <= 0) this.end(now);
+          if (this.state.lives <= 0) {
+            this.end(now);
+            activeBlades.length = 0;   // out: nothing else scores this frame
+          }
         }
       }
     }
@@ -299,6 +309,19 @@ export class FruitNinja {
       if (p.combo > 1 && now >= p.comboUntil) p.combo = 0;
     }
     if (this.state.combo > 1 && now >= this.state.comboUntil) this.state.combo = 0;
+  }
+
+  /** Fruit physics with no scoring: used once the board is over. */
+  stepFalling(dt) {
+    const floor = -this.h / 2 - 1.2;
+    for (let i = this.fruits.length - 1; i >= 0; i -= 1) {
+      const f = this.fruits[i];
+      f.vy -= GRAVITY * dt;
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      f.rot += f.spin * dt;
+      if (f.y + f.r < floor) this.fruits.splice(i, 1);
+    }
   }
 
   stepDebris(dt) {
@@ -323,3 +346,145 @@ export class FruitNinja {
 }
 
 FruitNinja.nextId = 1;
+
+/**
+ * A local match: one independent board per player, each with its own fruit,
+ * lives and score (the split-screen layout is just each board's viewport).
+ * First to lose all three lives — or touch a bomb — is out; the match ends when
+ * the last board falls, and the highest score wins.
+ *
+ * Boards are keyed by the relay's player slot (0..3). Players may join late
+ * (they get a fresh board at once — drop-in, like an arcade cabinet) or leave
+ * (their board is forfeited and keeps its score on the results screen).
+ */
+export const MAX_BOARDS = 4;
+
+export class FruitMatch {
+  constructor({ onEvent = () => {}, infiniteLives = false, rng = Math.random } = {}) {
+    this.onEvent = onEvent;
+    this.infiniteLives = infiniteLives;
+    this.rng = rng;
+    this.phase = 'idle';          // idle | playing | over
+    this.boards = new Map();      // slot → FruitNinja (insertion order = display order)
+    this.meta = new Map();        // slot → { over, overAt, reason }
+    this.startedAt = 0;
+    this.now = 0;
+    this.result = null;           // set when the match ends
+  }
+
+  get slots() { return [...this.boards.keys()].sort((a, b) => a - b); }
+  get count() { return this.boards.size; }
+
+  board(slot) { return this.boards.get(slot) || null; }
+  isOver(slot) { return !!this.meta.get(slot)?.over; }
+
+  #makeBoard(slot, aspect) {
+    const board = new FruitNinja({
+      aspect,
+      infiniteLives: this.infiniteLives,
+      rng: this.rng,
+      onEvent: (e) => this.#forward(slot, e),
+    });
+    this.boards.set(slot, board);
+    this.meta.set(slot, { over: false, overAt: null, reason: null });
+    return board;
+  }
+
+  #forward(slot, e) {
+    if (e.type === 'start') return;                 // the match announces its own start
+    const meta = this.meta.get(slot);
+    if (e.type === 'gameover') {
+      if (meta.over) return;
+      meta.over = true;
+      meta.overAt = this.now;
+      meta.reason ||= 'out';
+      this.onEvent({ type: 'out', slot, score: this.board(slot).state.score, reason: meta.reason });
+      this.#maybeFinish();
+      return;
+    }
+    this.onEvent({ ...e, slot });
+  }
+
+  /** Begin a round for exactly these slots. */
+  start(slots, now, aspects = {}) {
+    const list = [...new Set(slots)].filter((s) => s >= 0 && s < MAX_BOARDS).sort((a, b) => a - b);
+    if (list.length === 0) list.push(0);
+    this.boards.clear();
+    this.meta.clear();
+    this.result = null;
+    this.now = now;
+    this.startedAt = now;
+    this.phase = 'playing';
+    for (const slot of list) this.#makeBoard(slot, aspects[slot] || 16 / 9).start(now);
+    this.onEvent({ type: 'start', slots: list });
+  }
+
+  /** A phone connected mid-round: it gets its own fresh board immediately. */
+  join(slot, now, aspect = 16 / 9) {
+    if (this.phase !== 'playing' || this.boards.has(slot) || slot < 0 || slot >= MAX_BOARDS) return false;
+    this.now = now;
+    const b = this.#makeBoard(slot, aspect);
+    b.start(now);
+    this.onEvent({ type: 'join', slot });
+    return true;
+  }
+
+  /** A phone left mid-round: forfeit its board; it keeps its score. */
+  leave(slot, now) {
+    const b = this.boards.get(slot);
+    const meta = this.meta.get(slot);
+    if (!b || meta.over || this.phase !== 'playing') return false;
+    this.now = now;
+    meta.reason = 'left';
+    b.end(now);        // → 'gameover' → #forward marks it out
+    return true;
+  }
+
+  setAspect(slot, aspect) { this.boards.get(slot)?.setAspect(aspect); }
+
+  setCursor(slot, x, y, now) {
+    const b = this.boards.get(slot);
+    if (b && !this.isOver(slot)) b.setCursor(x, y, now, 0);
+  }
+
+  update(now, dt) {
+    this.now = now;
+    for (const b of this.boards.values()) b.update(now, dt);
+  }
+
+  #maybeFinish() {
+    if (this.phase !== 'playing' || this.boards.size === 0) return;
+    for (const slot of this.boards.keys()) if (!this.meta.get(slot).over) return;
+    this.phase = 'over';
+    const standings = this.standings();
+    const top = standings[0];
+    const winners = standings.filter((s) => s.score === top.score && s.overAt === top.overAt).map((s) => s.slot);
+    this.result = { standings, winners, solo: standings.length === 1 };
+    this.onEvent({ type: 'matchover', ...this.result });
+  }
+
+  /**
+   * Best first: higher score, then whoever lasted longer. Equal on both is a
+   * genuine tie and shares a rank.
+   */
+  standings() {
+    const rows = [...this.boards.entries()].map(([slot, b]) => {
+      const meta = this.meta.get(slot);
+      return {
+        slot,
+        score: b.state.score,
+        lives: b.state.lives,
+        over: meta.over,
+        overAt: meta.overAt,
+        reason: meta.reason,
+      };
+    });
+    const alive = (r) => (r.over ? r.overAt : Infinity);
+    rows.sort((a, b) => b.score - a.score || alive(b) - alive(a) || a.slot - b.slot);
+    rows.forEach((r, i) => {
+      const prev = rows[i - 1];
+      r.rank = prev && prev.score === r.score && alive(prev) === alive(r) ? prev.rank : i + 1;
+    });
+    return rows;
+  }
+}

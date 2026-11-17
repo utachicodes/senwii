@@ -330,23 +330,18 @@ export function medalFor(track, lapMs) {
 const RIVAL_COLORS = [0x2f7fd6, 0xffc23e, 0x39b46a, 0xb06ce8, 0xff7a4d];
 const RIVAL_NAMES = ['Breeze', 'Juno', 'Kestrel', 'Nova', 'Tango'];
 
-export class Race {
-  /**
-   * @param trackIndex which circuit
-   * @param seed       deterministic AI jitter
-   * @param ghost      best-lap keyframes to race against (optional)
-   */
-  constructor({ trackIndex = 0, onEvent = () => {}, seed = 7, ghost = null } = {}) {
-    this.onEvent = onEvent;
-    this.track = TRACKS[clamp(trackIndex, 0, TRACKS.length - 1)];
-    this.laps = this.track.laps;
-    this.rng = mulberry32(seed);
-    this.ghost = ghost;
-    this.state = 'ready';            // ready | countdown | racing | finished
-    this.countdownEnds = 0;
-    this.startedAt = 0;
+export const MAX_HUMANS = 4;
+export const FINISH_GRACE_MS = 20000; // multiplayer: stragglers get this long after the first finisher
 
-    // Player kart: free physics.
+/**
+ * One human driver: free kart physics plus lap/checkpoint bookkeeping. A Race
+ * owns one Car per human; the CPU karts are plain objects stepped by the Race.
+ */
+export class Car {
+  constructor(race, index, gridSlot) {
+    this.race = race;
+    this.index = index;
+    this.gridSlot = gridSlot;
     this.pos = { x: 0, z: 0 };
     this.heading = 0;
     this.motionHeading = 0;          // the velocity's direction; drift = lag
@@ -378,57 +373,37 @@ export class Race {
     this.bestRecording = null;       // ghost keys of the best completed lap
     this.preStart = true;            // still on the grid side of the line (lap 1)
     this.lastKeyMs = -Infinity;
-
-    // CPU grid: player starts 6th, rivals ahead — the comeback is the game.
-    // Front rows are the quicker drivers.
-    this.karts = [];
-    for (let i = 0; i < RACER_COUNT - 1; i += 1) {
-      const slot = i;                          // 0..4, player is slot 5
-      const row = Math.floor(slot / 2);
-      const side = slot % 2 ? -1 : 1;
-      const off = side * (0.34 + (slot % 3) * 0.05) * this.track.halfWidth;
-      const gridT = -(GRID_ROW_M * (row + 1.2)) / trackLengthM(this.track);
-      const p = trackCenterAt(this.track, gridT);
-      const n = trackNormal(this.track, gridT);
-      this.karts.push({
-        id: i,
-        name: RIVAL_NAMES[i % RIVAL_NAMES.length],
-        color: RIVAL_COLORS[i % RIVAL_COLORS.length],
-        progressM: -GRID_ROW_M * (row + 1.2),
-        t: gridT,
-        offset: off,
-        targetOffset: 0,
-        speed: 0,
-        skill: 0.905 - slot * 0.02 + this.rng() * 0.014,
-        finishedMs: null,
-        wobPhase: this.rng() * TAU,
-        wobHz: 0.12 + this.rng() * 0.1,
-        boostUntil: 0,
-        padCooldown: 0,
-        pos: { x: p.x + n.x * off, z: p.z + n.z * off },
-      });
-    }
+    this.out = false;                // disconnected: no longer driven or counted
+    this.dnf = false;                // classified by progress, not by finishing
+    this.reported = false;           // its 'finish' event has been emitted
   }
 
-  start(now) {
-    this.state = 'countdown';
-    this.countdownEnds = now + COUNTDOWN_MS;
-    this.startedAt = now + COUNTDOWN_MS;
-    // Player at the back of the grid, free slot of the last row (kart 4 took
-    // the +normal side, so the player takes the −normal side of that row).
-    const row = Math.floor((RACER_COUNT - 1) / 2);
+  get track() { return this.race.track; }
+
+  emit(e) { this.race.onEvent({ ...e, car: this.index }); }
+
+  /** Put the kart on its grid slot, facing down the road. */
+  place() {
+    const track = this.track;
+    const row = Math.floor(this.gridSlot / 2);
+    const side = this.gridSlot % 2 ? -1 : 1;
     const behind = GRID_ROW_M * (row + 1.2);
-    const gridT = -behind / trackLengthM(this.track);
-    const p = trackCenterAt(this.track, gridT);
-    const n = trackNormal(this.track, gridT);
-    this.pos = { x: p.x - n.x * 0.4 * this.track.halfWidth, z: p.z - n.z * 0.4 * this.track.halfWidth };
-    this.heading = trackHeading(this.track, gridT);
+    const gridT = -behind / trackLengthM(track);
+    const p = trackCenterAt(track, gridT);
+    const n = trackNormal(track, gridT);
+    this.pos = { x: p.x + n.x * (side * 0.4) * track.halfWidth, z: p.z + n.z * (side * 0.4) * track.halfWidth };
+    this.heading = trackHeading(track, gridT);
     this.motionHeading = this.heading;
     this.speed = 0;
     this.progressM = -behind;
+  }
+
+  reset(now) {
+    this.place();
+    this.steer = 0;
     this.lap = 1;
     this.nextCp = 1;
-    this.lapStartMs = this.startedAt;
+    this.lapStartMs = this.race.startedAt;
     this.lapMs = 0;
     this.lastLapMs = null;
     this.bestLapMs = null;
@@ -440,10 +415,19 @@ export class Race {
     this.lastKeyMs = -Infinity;
     this.driftCharge = 0;
     this.drifting = false;
+    this.driftTier = 0;
     this.boostUntil = 0;
     this.padBoostUntil = 0;
     this.offRoadSince = null;
-    this.onEvent({ type: 'countdown' });
+    this.out = false;
+    this.dnf = false;
+    this.reported = false;
+    void now;
+  }
+
+  /** Is this car under the player's control right now? */
+  get racing() {
+    return this.race.state === 'racing' && this.finishedMs === null && !this.out;
   }
 
   setSteer(bankDeg) {
@@ -451,12 +435,12 @@ export class Race {
   }
 
   setDrift(on, now = 0) {
-    if (on && !this.drifting && this.state === 'racing') {
+    if (on && !this.drifting && this.race.state === 'racing' && !this.out) {
       // The hop: a drift only starts while turning at speed.
       if (Math.abs(this.steer) >= DRIFT_MIN_STEER && this.speed >= DRIFT_MIN_SPEED) {
         this.drifting = true;
         this.driftCharge = 0;
-        this.onEvent({ type: 'hop' });
+        this.emit({ type: 'hop' });
       }
     } else if (!on && this.drifting) {
       this.releaseDrift(now);
@@ -468,7 +452,7 @@ export class Race {
     if (this.drifting && this.driftTier > 0) {
       const until = now + BOOST_T[this.driftTier - 1] * 1000;
       this.boostUntil = Math.max(this.boostUntil, until);
-      this.onEvent({ type: 'boost', tier: this.driftTier });
+      this.emit({ type: 'boost', tier: this.driftTier });
     }
     this.drifting = false;
     this.driftCharge = 0;
@@ -477,37 +461,6 @@ export class Race {
 
   setBrake(on) {
     this.brakeHeld = on;
-  }
-
-  // ── Per-frame update ──
-  update(now, dt) {
-    dt = Math.min(dt, 1 / 20);      // a background tab must not teleport karts
-    if (this.state === 'countdown') {
-      this.lapMs = 0;
-      if (now >= this.countdownEnds) {
-        this.state = 'racing';
-        this.lapStartMs = now;
-        this.onEvent({ type: 'go' });
-      }
-      return;
-    }
-    if (this.state !== 'racing' && this.state !== 'finished') return;
-    const racing = this.state === 'racing';
-    this.lapMs = racing ? now - this.lapStartMs : this.lapMs;
-
-    this.stepPlayer(now, dt, racing);
-    for (const k of this.karts) this.stepKart(k, now, dt, racing);
-    this.separateKarts();
-
-    if (racing) {
-      this.checkProgress(now);
-      // After the lap counter has had its say, so crossing the line is one
-      // continuous step (never a frame a lap short or a lap ahead).
-      this.updateProgress();
-      this.recordGhost();
-      this.updateRank();
-      if (this.finishedMs !== null) this.finish();
-    }
   }
 
   /** Snap the kart back onto the road after too long off it. */
@@ -521,13 +474,14 @@ export class Race {
     if (this.drifting) this.releaseDrift(now);
     this.boostUntil = 0;
     this.offRoadSince = null;
-    this.onEvent({ type: 'rescue' });
+    this.emit({ type: 'rescue' });
   }
 
   stepPlayer(now, dt, racing) {
-    const near = nearestOnTrack(this.track, this.pos.x, this.pos.z);
+    const track = this.track;
+    const near = nearestOnTrack(track, this.pos.x, this.pos.z);
     this.trackT = near.t;
-    this.onTrack = near.dist <= this.track.halfWidth;
+    this.onTrack = near.dist <= track.halfWidth;
 
     // Stuck off the road? Standard kart-racer rescue after a grace period.
     if (racing && !this.onTrack) {
@@ -587,7 +541,7 @@ export class Race {
         : this.driftCharge >= DRIFT_CHARGE_T1 ? 1 : 0;
       if (tier !== this.driftTier) {
         this.driftTier = tier;
-        this.onEvent({ type: 'spark', tier });
+        this.emit({ type: 'spark', tier });
       }
     }
 
@@ -595,11 +549,11 @@ export class Race {
 
     // Boost pads on the road.
     if (now > this.padCooldown) {
-      for (const padT of this.track.pads) {
+      for (const padT of track.pads) {
         if (Math.abs(tDiff(this.trackT, padT)) < 0.007 && this.onTrack) {
           this.padCooldown = now + 1500;
           this.padBoostUntil = now + BOOST_PAD_MS;
-          this.onEvent({ type: 'pad' });
+          this.emit({ type: 'pad' });
           break;
         }
       }
@@ -609,10 +563,10 @@ export class Race {
     // Only the lateral overshoot is removed, so a scraping kart keeps
     // sliding along the wall instead of grinding against one spot.
     this.scraping = false;
-    const lim = this.track.halfWidth + WALL_MARGIN;
+    const lim = track.halfWidth + WALL_MARGIN;
     if (near.dist > lim) {
-      const c = trackCenterAt(this.track, near.t);
-      const n = trackNormal(this.track, near.t);
+      const c = trackCenterAt(track, near.t);
+      const n = trackNormal(track, near.t);
       const lat = (this.pos.x - c.x) * n.x + (this.pos.z - c.z) * n.z;
       const latC = clamp(lat, -lim, lim);
       this.pos.x += n.x * (latC - lat);
@@ -636,85 +590,6 @@ export class Race {
     }
     // Laps actually closed, not this.lap: the last lap never bumps the counter.
     this.progressM = this.lapTimes.length * L + s;
-  }
-
-  stepKart(k, now, dt, racing) {
-    if (k.finishedMs !== null) {
-      // Rolling to a stop past the line.
-      k.speed = Math.max(0, k.speed - 8 * dt);
-      k.progressM += k.speed * dt;
-      k.t = tAtS(this.track, k.progressM);
-      return;
-    }
-    // Racing line: hug the inside of the bend. Curvature is positive when
-    // the road bends right, and the normal points right — so the inside of
-    // a bend is the +normal side, which is where the apex offset goes.
-    const curve = trackCurvature(this.track, k.t);
-    const apex = clamp(curve * 2.2, -0.62, 0.62) * this.track.halfWidth;
-    const wobble = Math.sin(now / 1000 * k.wobHz * TAU + k.wobPhase) * this.track.halfWidth * 0.14;
-    k.targetOffset = apex * 0.7 + wobble;
-    k.offset += clamp(k.targetOffset - k.offset, -3.2 * dt, 3.2 * dt);
-
-    // Pace: a 1.3× corner allowance (they ride the true line, the player
-    // doesn't have to) capped by per-driver skill. The player is faster in
-    // a straight line; the comeback is earned in the corners and the pads.
-    let v = Math.min(
-      curveSpeed(this.track, k.t, this.track.halfWidth) * 1.3,
-      TOP_SPEED * k.skill * 1.02,
-    );
-    if (racing) {
-      const gapM = this.progressM - k.progressM;    // + = kart behind the player
-      v *= clamp(1 + gapM * 0.0009, 0.9, 1.09);
-      if (now < k.boostUntil) v = Math.max(v, BOOST_SPEED * 0.94);
-    } else {
-      v = 0;
-    }
-    k.speed += clamp(v - k.speed, -BRAKE * dt, ACCEL * 0.85 * dt);
-    k.progressM += k.speed * dt;
-    k.t = tAtS(this.track, k.progressM);
-
-    // Boost pads count for the AI too, a touch weaker.
-    if (now > k.padCooldown) {
-      for (const padT of this.track.pads) {
-        if (Math.abs(tDiff(k.t, padT)) < 0.007) {
-          k.padCooldown = now + 1500;
-          k.boostUntil = now + BOOST_PAD_MS * 0.8;
-          break;
-        }
-      }
-    }
-
-    if (k.progressM >= trackLengthM(this.track) * this.laps) {
-      k.finishedMs = now;
-      this.onEvent({ type: 'rival-finish', name: k.name });
-    }
-  }
-
-  kartWorldPos(k) {
-    const c = trackCenterAt(this.track, k.t);
-    const n = trackNormal(this.track, k.t);
-    return { x: c.x + n.x * k.offset, z: c.z + n.z * k.offset };
-  }
-
-  /** Soft separation so karts nudge rather than pass through each other. */
-  separateKarts() {
-    for (const k of this.karts) {
-      const kp = this.kartWorldPos(k);
-      const dx = kp.x - this.pos.x;
-      const dz = kp.z - this.pos.z;
-      const d = Math.hypot(dx, dz);
-      const minD = KART_RADIUS * 2;
-      if (d > 0 && d < minD) {
-        const push = (minD - d) / 2;
-        const ux = dx / d;
-        const uz = dz / d;
-        this.pos.x -= ux * push;
-        this.pos.z -= uz * push;
-        const n = trackNormal(this.track, k.t);
-        k.offset += (ux * n.x + uz * n.z) * push * 0.8;
-        k.speed *= 0.995;
-      }
-    }
   }
 
   /** Checkpoints in order, then the line closes the lap. */
@@ -748,8 +623,8 @@ export class Race {
       this.bestLapMs = ms;
       this.bestRecording = this.recording.slice();
     }
-    this.onEvent({ type: 'lap', lap: this.lap, ms, best: isBest });
-    if (this.lap >= this.laps) {
+    this.emit({ type: 'lap', lap: this.lap, ms, best: isBest });
+    if (this.lap >= this.race.laps) {
       this.finishedMs = now;
       return;
     }
@@ -770,11 +645,287 @@ export class Race {
       this.lastKeyMs = this.lapMs;
     }
   }
+}
+
+export class Race {
+  /**
+   * @param trackIndex which circuit
+   * @param seed       deterministic AI jitter
+   * @param ghost      best-lap keyframes to race against (optional; solo only)
+   * @param humans     human drivers, 1..4; the rest of the grid is CPU
+   */
+  constructor({ trackIndex = 0, onEvent = () => {}, seed = 7, ghost = null, humans = 1 } = {}) {
+    this.onEvent = onEvent;
+    this.track = TRACKS[clamp(trackIndex, 0, TRACKS.length - 1)];
+    this.laps = this.track.laps;
+    this.rng = mulberry32(seed);
+    this.humans = clamp(Math.floor(humans) || 1, 1, MAX_HUMANS);
+    this.ghost = this.humans === 1 ? ghost : null;
+    this.state = 'ready';            // ready | countdown | racing | finished
+    this.countdownEnds = 0;
+    this.startedAt = 0;
+    this.graceEnds = null;           // multiplayer: when stragglers are cut off
+
+    // Humans take the back of the grid; the quicker CPU drivers start in front.
+    this.cars = [];
+    for (let i = 0; i < this.humans; i += 1) {
+      this.cars.push(new Car(this, i, RACER_COUNT - this.humans + i));
+    }
+
+    // CPU grid: humans start at the back, rivals ahead — the comeback is the game.
+    this.karts = [];
+    for (let i = 0; i < RACER_COUNT - this.humans; i += 1) {
+      const slot = i;
+      const row = Math.floor(slot / 2);
+      const side = slot % 2 ? -1 : 1;
+      const off = side * (0.34 + (slot % 3) * 0.05) * this.track.halfWidth;
+      const gridT = -(GRID_ROW_M * (row + 1.2)) / trackLengthM(this.track);
+      const p = trackCenterAt(this.track, gridT);
+      const n = trackNormal(this.track, gridT);
+      this.karts.push({
+        id: i,
+        name: RIVAL_NAMES[i % RIVAL_NAMES.length],
+        color: RIVAL_COLORS[i % RIVAL_COLORS.length],
+        progressM: -GRID_ROW_M * (row + 1.2),
+        t: gridT,
+        offset: off,
+        targetOffset: 0,
+        speed: 0,
+        skill: 0.905 - slot * 0.02 + this.rng() * 0.014,
+        finishedMs: null,
+        wobPhase: this.rng() * TAU,
+        wobHz: 0.12 + this.rng() * 0.1,
+        boostUntil: 0,
+        padCooldown: 0,
+        pos: { x: p.x + n.x * off, z: p.z + n.z * off },
+      });
+    }
+  }
+
+  /** Display name of a human car in standings. */
+  carName(i) { return this.humans === 1 ? 'you' : `P${i + 1}`; }
+
+  start(now) {
+    this.state = 'countdown';
+    this.countdownEnds = now + COUNTDOWN_MS;
+    this.startedAt = now + COUNTDOWN_MS;
+    this.graceEnds = null;
+    for (const c of this.cars) c.reset(now);
+    this.onEvent({ type: 'countdown' });
+  }
+
+  setSteer(bankDeg, car = 0) { this.cars[car]?.setSteer(bankDeg); }
+
+  setDrift(on, now = 0, car = 0) { this.cars[car]?.setDrift(on, now); }
+
+  setBrake(on, car = 0) { this.cars[car]?.setBrake(on); }
+
+  releaseDrift(now = 0, car = 0) { this.cars[car]?.releaseDrift(now); }
+
+  rescue(now, car = 0) { this.cars[car]?.rescue(now); }
+
+  completeLap(now, car = 0) { this.cars[car]?.completeLap(now); }
+
+  stepPlayer(now, dt, racing, car = 0) { this.cars[car]?.stepPlayer(now, dt, racing); }
+
+  updateProgress(car = 0) { this.cars[car]?.updateProgress(); }
+
+  checkProgress(now, car = 0) { this.cars[car]?.checkProgress(now); }
+
+  recordGhost(car = 0) { this.cars[car]?.recordGhost(); }
+
+  /** A human left mid-race: stop driving and counting them. */
+  dropCar(index, now = 0) {
+    const car = this.cars[index];
+    if (!car || car.out) return;
+    car.out = true;
+    car.dnf = car.finishedMs === null;
+    car.reported = true;
+    car.steer = 0;
+    car.brakeHeld = false;
+    if (car.drifting) car.releaseDrift(now);
+    this.onEvent({ type: 'dropout', car: index });
+    if (this.state === 'racing') this.checkRaceOver(now);
+  }
+
+  // ── Per-frame update ──
+  update(now, dt) {
+    dt = Math.min(dt, 1 / 20);      // a background tab must not teleport karts
+    if (this.state === 'countdown') {
+      for (const c of this.cars) c.lapMs = 0;
+      if (now >= this.countdownEnds) {
+        this.state = 'racing';
+        for (const c of this.cars) c.lapStartMs = now;
+        this.onEvent({ type: 'go' });
+      }
+      return;
+    }
+    if (this.state !== 'racing' && this.state !== 'finished') return;
+    const racing = this.state === 'racing';
+
+    for (const c of this.cars) {
+      const live = racing && c.finishedMs === null && !c.out;
+      if (live) c.lapMs = now - c.lapStartMs;
+      c.stepPlayer(now, dt, live);
+    }
+    for (const k of this.karts) this.stepKart(k, now, dt, racing);
+    this.separateKarts();
+
+    if (racing) {
+      for (const c of this.cars) {
+        if (c.finishedMs !== null || c.out) continue;
+        c.checkProgress(now);
+        // After the lap counter has had its say, so crossing the line is one
+        // continuous step (never a frame a lap short or a lap ahead).
+        c.updateProgress();
+        c.recordGhost();
+      }
+      this.updateRank();
+      for (const c of this.cars) {
+        if (c.finishedMs !== null && !c.reported) this.finishCar(c, now);
+      }
+      if (this.state === 'racing') this.checkRaceOver(now);
+    }
+  }
+
+  /** Race ends when every human is done (or gone), or the grace window runs out. */
+  checkRaceOver(now) {
+    const active = this.cars.filter((c) => !c.out);
+    if (active.every((c) => c.finishedMs !== null)) {
+      this.endRace(now);
+    } else if (this.graceEnds !== null && now >= this.graceEnds) {
+      for (const c of active) {
+        if (c.finishedMs !== null) continue;
+        c.dnf = true;
+        c.reported = true;
+        this.emitFinish(c, true);
+      }
+      this.endRace(now);
+    }
+  }
+
+  endRace() {
+    if (this.state === 'finished') return;
+    this.state = 'finished';
+    this.updateRank();
+    this.onEvent({ type: 'raceover', standings: this.standings() });
+  }
+
+  stepKart(k, now, dt, racing) {
+    if (k.finishedMs !== null) {
+      // Rolling to a stop past the line.
+      k.speed = Math.max(0, k.speed - 8 * dt);
+      k.progressM += k.speed * dt;
+      k.t = tAtS(this.track, k.progressM);
+      return;
+    }
+    // Racing line: hug the inside of the bend. Curvature is positive when
+    // the road bends right, and the normal points right — so the inside of
+    // a bend is the +normal side, which is where the apex offset goes.
+    const curve = trackCurvature(this.track, k.t);
+    const apex = clamp(curve * 2.2, -0.62, 0.62) * this.track.halfWidth;
+    const wobble = Math.sin(now / 1000 * k.wobHz * TAU + k.wobPhase) * this.track.halfWidth * 0.14;
+    k.targetOffset = apex * 0.7 + wobble;
+    k.offset += clamp(k.targetOffset - k.offset, -3.2 * dt, 3.2 * dt);
+
+    // Pace: a 1.3× corner allowance (they ride the true line, the player
+    // doesn't have to) capped by per-driver skill. The player is faster in
+    // a straight line; the comeback is earned in the corners and the pads.
+    let v = Math.min(
+      curveSpeed(this.track, k.t, this.track.halfWidth) * 1.3,
+      TOP_SPEED * k.skill * 1.02,
+    );
+    if (racing) {
+      const gapM = this.humanProgress() - k.progressM;    // + = kart behind the humans
+      v *= clamp(1 + gapM * 0.0009, 0.9, 1.09);
+      if (now < k.boostUntil) v = Math.max(v, BOOST_SPEED * 0.94);
+    } else {
+      v = 0;
+    }
+    k.speed += clamp(v - k.speed, -BRAKE * dt, ACCEL * 0.85 * dt);
+    k.progressM += k.speed * dt;
+    k.t = tAtS(this.track, k.progressM);
+
+    // Boost pads count for the AI too, a touch weaker.
+    if (now > k.padCooldown) {
+      for (const padT of this.track.pads) {
+        if (Math.abs(tDiff(k.t, padT)) < 0.007) {
+          k.padCooldown = now + 1500;
+          k.boostUntil = now + BOOST_PAD_MS * 0.8;
+          break;
+        }
+      }
+    }
+
+    if (k.progressM >= trackLengthM(this.track) * this.laps) {
+      k.finishedMs = now;
+      this.onEvent({ type: 'rival-finish', name: k.name });
+    }
+  }
+
+  /** Mean progress of the drivers still in the race: what the CPU rubber-bands to. */
+  humanProgress() {
+    let live = this.cars.filter((c) => !c.out && c.finishedMs === null);
+    if (live.length === 0) live = this.cars.filter((c) => !c.out);
+    if (live.length === 0) live = this.cars;
+    if (live.length === 1) return live[0].progressM;
+    return live.reduce((a, c) => a + c.progressM, 0) / live.length;
+  }
+
+  kartWorldPos(k) {
+    const c = trackCenterAt(this.track, k.t);
+    const n = trackNormal(this.track, k.t);
+    return { x: c.x + n.x * k.offset, z: c.z + n.z * k.offset };
+  }
+
+  /** Soft separation so karts nudge rather than pass through each other. */
+  separateKarts() {
+    const minD = KART_RADIUS * 2;
+    for (const car of this.cars) {
+      for (const k of this.karts) {
+        const kp = this.kartWorldPos(k);
+        const dx = kp.x - car.pos.x;
+        const dz = kp.z - car.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0 && d < minD) {
+          const push = (minD - d) / 2;
+          const ux = dx / d;
+          const uz = dz / d;
+          car.pos.x -= ux * push;
+          car.pos.z -= uz * push;
+          const n = trackNormal(this.track, k.t);
+          k.offset += (ux * n.x + uz * n.z) * push * 0.8;
+          k.speed *= 0.995;
+        }
+      }
+    }
+    // Human against human: an even shove each way.
+    for (let i = 0; i < this.cars.length; i += 1) {
+      for (let j = i + 1; j < this.cars.length; j += 1) {
+        const a = this.cars[i];
+        const b = this.cars[j];
+        const dx = b.pos.x - a.pos.x;
+        const dz = b.pos.z - a.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d < minD) {
+          // Exactly stacked: split along the road's side axis so they un-stick.
+          const n = d > 1e-6 ? { x: dx / d, z: dz / d } : trackNormal(this.track, a.trackT);
+          const push = (minD - d) / 2;
+          a.pos.x -= n.x * push;
+          a.pos.z -= n.z * push;
+          b.pos.x += n.x * push;
+          b.pos.z += n.z * push;
+        }
+      }
+    }
+  }
 
   /** Standings: finished karts by time, the rest by track progress. */
   standings() {
     const entries = [
-      { who: 'you', done: this.finishedMs, prog: this.progressM },
+      ...this.cars.map((c) => ({
+        who: this.carName(c.index), car: c.index, done: c.finishedMs, prog: c.progressM, dnf: c.dnf,
+      })),
       ...this.karts.map((k) => ({ who: k.name, done: k.finishedMs, prog: k.progressM })),
     ];
     entries.sort((a, b) => {
@@ -788,22 +939,35 @@ export class Race {
 
   updateRank() {
     const s = this.standings();
-    this.rank = s.findIndex((e) => e.who === 'you') + 1;
+    for (const c of this.cars) c.rank = s.findIndex((e) => e.car === c.index) + 1;
   }
 
-  finish() {
-    this.state = 'finished';
+  emitFinish(car, dnf = false) {
     const standings = this.standings();
-    const place = standings.findIndex((e) => e.who === 'you') + 1;
-    const pts = POINTS[clamp(place - 1, 0, POINTS.length - 1)];
+    const place = standings.findIndex((e) => e.car === car.index) + 1;
+    car.rank = place;
     this.onEvent({
       type: 'finish',
+      car: car.index,
       place,
-      points: pts,
+      points: POINTS[clamp(place - 1, 0, POINTS.length - 1)],
       standings,
-      bestLapMs: this.bestLapMs,
-      lapTimes: [...this.lapTimes],
+      bestLapMs: car.bestLapMs,
+      lapTimes: [...car.lapTimes],
+      dnf,
     });
+  }
+
+  /** A human crossed the final line. */
+  finishCar(car, now) {
+    car.reported = true;
+    if (this.humans > 1 && this.graceEnds === null) this.graceEnds = now + FINISH_GRACE_MS;
+    // Close the race first when this was the last driver, so the 'finish'
+    // handler already sees state === 'finished' (as the solo game always has).
+    const open = this.cars.some((c) => !c.out && c.finishedMs === null);
+    if (!open) this.state = 'finished';
+    this.emitFinish(car);
+    if (!open) this.onEvent({ type: 'raceover', standings: this.standings() });
   }
 
   /** Ghost pose at a lap-relative time, interpolated between keyframes. */
@@ -824,4 +988,18 @@ export class Race {
       h: a.h + wrapAngle(b.h - a.h) * f,
     };
   }
+}
+
+// Legacy single-player surface: `race.pos`, `race.speed`, … read and write the
+// first car, so everything written before multiplayer keeps working untouched.
+for (const f of [
+  'pos', 'heading', 'motionHeading', 'speed', 'steer', 'driftHeld', 'brakeHeld', 'drifting',
+  'driftCharge', 'driftTier', 'boostUntil', 'padBoostUntil', 'padCooldown', 'scraping', 'onTrack',
+  'offRoadSince', 'trackT', 'progressM', 'lap', 'nextCp', 'lapStartMs', 'lapMs', 'lastLapMs',
+  'bestLapMs', 'lapTimes', 'finishedMs', 'rank', 'recording', 'bestRecording', 'preStart', 'lastKeyMs',
+]) {
+  Object.defineProperty(Race.prototype, f, {
+    get() { return this.cars[0][f]; },
+    set(v) { this.cars[0][f] = v; },
+  });
 }

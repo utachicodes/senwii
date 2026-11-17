@@ -7,11 +7,12 @@ const launchData = consumeLaunchSplash();
 import { createChannel } from '../../core/channel.js';
 import { axesFromSample } from '../../core/orientation.js';
 import { TraySteer } from '../../core/tilt.js';
+import { splitLayout, toViewport } from '../../core/splitscreen.js';
 import {
   Race, TRACKS, trackBySlug, trackCenterAt, trackNormal, trackHeading,
   trackLengthM, tAtS, nearestOnTrack, fmtMs, medalFor, loadSave, persistSave,
   ordinal, TOP_SPEED, BOOST_SPEED, BOOST_T, DRIFT_CHARGE_T1, DRIFT_CHARGE_T2,
-  DRIFT_CHARGE_T3, RACER_COUNT, GRID_ROW_M, PODIUM, POINTS,
+  DRIFT_CHARGE_T3, RACER_COUNT, GRID_ROW_M, PODIUM, POINTS, MAX_HUMANS,
 } from './logic.js';
 
 /**
@@ -28,7 +29,8 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(62, 1, 0.3, 1500);
+// One chase camera per human; a lone player only ever uses cameras[0].
+const cameras = Array.from({ length: MAX_HUMANS }, () => new THREE.PerspectiveCamera(62, 1, 0.3, 1500));
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.72));
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.45);
@@ -349,26 +351,31 @@ function buildKart(bodyColor, opts = {}) {
   return { group: g, tilt, wheels };
 }
 
-const playerKart = buildKart(0xe23b3b, { helmet: 0xf6f2ea });
-scene.add(playerKart.group);
+// One kart per possible human. Colours are distinct from the CPU rivals' and
+// double as the player colour on every HUD (P1 red … P4 white).
+const PLAYER_COLORS = [0xe23b3b, 0x00d1c1, 0xff5fa8, 0xf2f2f2];
+const cssColor = (c) => `#${c.toString(16).padStart(6, '0')}`;
+const playerKarts = PLAYER_COLORS.map((c) => {
+  const k = buildKart(c, { helmet: 0xf6f2ea });
+  k.group.visible = false;
+  scene.add(k.group);
+  // Boost flames on the tail.
+  const flameGeo = new THREE.ConeGeometry(0.34, 1.6, 8);
+  flameGeo.rotateX(-Math.PI / 2);
+  k.flames = [-0.55, 0.55].map((side) => {
+    const f = new THREE.Mesh(flameGeo, additive(0x7fd4ff, 0.9));
+    f.position.set(side, 0.55, 2.4);
+    f.visible = false;
+    k.tilt.add(f);
+    return f;
+  });
+  return k;
+});
+playerKarts[0].group.visible = true;
 const rivalKarts = new Map();          // kart id → { group, tilt, wheels }
 const ghostKart = buildKart(0x9ecbff, { ghost: true });
 ghostKart.group.visible = false;
 scene.add(ghostKart.group);
-
-// Boost flames on the player's tail.
-const flames = [];
-{
-  const flameGeo = new THREE.ConeGeometry(0.34, 1.6, 8);
-  flameGeo.rotateX(-Math.PI / 2);
-  for (const side of [-0.55, 0.55]) {
-    const f = new THREE.Mesh(flameGeo, additive(0x7fd4ff, 0.9));
-    f.position.set(side, 0.55, 2.4);
-    f.visible = false;
-    playerKart.tilt.add(f);
-    flames.push(f);
-  }
-}
 
 // ── Particles: sparks, dust, confetti ──────────────────────────────────────
 
@@ -473,7 +480,10 @@ function drawMinimap(race, now) {
     dot(kp.x, kp.z, `#${k.color.toString(16).padStart(6, '0')}`, 5);
   }
   const pulse = 6 + Math.sin(now / 180) * 1.4;
-  dot(race.pos.x, race.pos.z, '#ff3b30', pulse);
+  for (const c of race.cars) {
+    if (c.out) continue;
+    dot(c.pos.x, c.pos.z, cssColor(PLAYER_COLORS[c.index]), pulse);
+  }
 }
 
 // ── UI + persistence ───────────────────────────────────────────────────────
@@ -514,9 +524,105 @@ function changeTrack(delta) {
   // A finished race lives on the old track's coordinates: stop stepping it
   // under the new scenery. The next A starts a fresh race here.
   race = null;
+  buildCells(1);
   syncTrackSelect();
   loadTrack(trackIndex);
   channel.audio.play('hover');
+}
+
+// ── Players ────────────────────────────────────────────────────────────────
+// A "slot" is the relay's phone index (P1 = slot 0). A "car" is a seat in the
+// current race. `participants[car] = slot`, fixed when the race starts, so a
+// phone that joins mid-race waits for the next one.
+
+let participants = [];               // car index → relay slot
+let phoneCars = new Set();           // cars driven by a real phone (vs. keyboard only)
+const steers = new Map();            // slot → TraySteer, one neutral per phone
+const lastSampleAt = new Map();      // slot → performance.now() of its latest packet
+
+let invertSteer = false;
+try { invertSteer = localStorage.getItem('senwii.racingInvert') === '1'; } catch { /* private mode */ }
+
+function steerFor(slot) {
+  let st = steers.get(slot);
+  if (!st) {
+    // Failsafe: if steering ever feels backwards, I inverts it and sticks.
+    st = new TraySteer({ invert: invertSteer });
+    steers.set(slot, st);
+  }
+  return st;
+}
+const carOfSlot = (slot) => participants.indexOf(slot);
+const slotLabel = (car) => `P${(participants[car] ?? car) + 1}`;
+const occupiedSlots = () => (channel.link.slots || []).filter((s) => s.occupied).map((s) => s.slot);
+
+function rosterHtml() {
+  const occ = occupiedSlots();
+  if (!occ.length) return '<span class="pl">keyboard · 1 player</span>';
+  return occ.slice(0, MAX_HUMANS).map((s) => `<span class="pl"><span class="pdot" style="background:${cssColor(PLAYER_COLORS[s % PLAYER_COLORS.length])}"></span>P${s + 1}</span>`).join('')
+    + (occ.length > 1 ? `<span class="pl">${occ.length} players · split screen</span>` : '');
+}
+function refreshRoster() {
+  const el = $('roster');
+  if (el) el.innerHTML = rosterHtml();
+}
+
+// ── Split-screen HUD ───────────────────────────────────────────────────────
+// One HUD card set per cell; a lone player's cell is the whole screen and
+// looks exactly as the single-player HUD always has.
+
+let layout = splitLayout(1, 'rows');
+const cellEls = [];
+
+function buildCells(n) {
+  layout = splitLayout(n, 'rows');
+  $('hud').classList.toggle('split', n > 1);
+  const host = $('cells');
+  host.innerHTML = '';
+  cellEls.length = 0;
+  layout.cells.forEach((r, i) => {
+    const el = document.createElement('div');
+    el.className = 'cell';
+    el.style.cssText = `left:${r.x * 100}%;top:${r.y * 100}%;width:${r.w * 100}%;height:${r.h * 100}%;`;
+    el.style.setProperty('--pc', cssColor(PLAYER_COLORS[i]));
+    el.innerHTML = `<div class="card racecard"><div class="place">6th</div>
+        <div class="laprow">lap 1/3</div><div class="timetrial">0:00.00</div></div>
+      <div class="tag">${slotLabel(i)}</div>
+      <div class="fin"></div>
+      <div class="speedo"><div class="speed">0<small> km/h</small></div>
+        <div class="driftwrap"><div class="drift"></div></div></div>
+      <div class="toast"></div>`;
+    host.appendChild(el);
+    const q = (c) => el.querySelector(`.${c}`);
+    cellEls.push({
+      root: el, place: q('place'), laprow: q('laprow'), time: q('timetrial'), tag: q('tag'),
+      fin: q('fin'), speed: q('speed'), driftwrap: q('driftwrap'), drift: q('drift'),
+      toast: q('toast'), toastUntil: 0,
+    });
+  });
+  layoutHud(n);
+}
+
+/** Park the shared minimap/standings where the split leaves room for them. */
+function layoutHud(n) {
+  const mmEl = $('minimap');
+  const st = $('standings');
+  mmEl.style.cssText = '';
+  st.style.cssText = '';
+  if (n === 1) return;
+  st.style.display = 'none';
+  const centre = (x, y, size) => {
+    mmEl.style.cssText = `left:${x * 100}%;top:${y * 100}%;right:auto;bottom:auto;`
+      + `width:${size}px;height:${size}px;transform:translate(-50%,-50%);`;
+  };
+  if (n === 3 && layout.spare) {
+    const sp = layout.spare;
+    centre(sp.x + sp.w * 0.74, sp.y + sp.h * 0.5, 176);
+    st.style.cssText = `display:block;right:auto;left:${(sp.x + sp.w * 0.06) * 100}%;top:${(sp.y + sp.h * 0.5) * 100}%;`
+      + 'transform:translateY(-50%);';
+  } else {
+    centre(0.5, 0.5, 112);
+  }
 }
 
 function showMenu() {
@@ -524,11 +630,14 @@ function showMenu() {
   $('panel').innerHTML = `<h1>${icon('car')} <em>Turbo Racing</em></h1>
     <p>Hold the phone like a wheel and roll it to steer. Bank into a corner and
        hold <b>A</b> to drift — let go for a mini-turbo. Blue arrows are boost
-       pads. Finish <b>top 3</b> to unlock the next cup.</p>
+       pads. Finish <b>top 3</b> to unlock the next cup. Up to <b>4 players</b>:
+       every phone that joins gets its own split-screen view.</p>
+    <div id="roster"></div>
     <div id="tracks"></div>
     <div id="points"></div>
     <div class="cta"><strong>A</strong> or <strong>Space</strong> race · <strong>↑↓</strong> pick track · <strong>B</strong> menu</div>`;
   syncTrackSelect();
+  refreshRoster();
   $('overlay').classList.remove('hide');
 }
 
@@ -540,13 +649,7 @@ const RESTART_GUARD_MS = 1000;       // a held/bounced A must not skip the resul
 let last = performance.now();
 let fps = 0; let frames = 0; let fpsMark = last;
 let countdownPulse = 0;
-let toastUntil = 0;
 let resultMenuShown = false;
-
-// Failsafe: if steering ever feels backwards, I inverts it and sticks.
-let invertSteer = false;
-try { invertSteer = localStorage.getItem('senwii.racingInvert') === '1'; } catch { /* private mode */ }
-const steer = new TraySteer({ invert: invertSteer });
 
 // Grid pose of the selected track, for the menu backdrop between races.
 let preview = null;
@@ -566,16 +669,19 @@ function loadTrack(index) {
 }
 
 const canStart = () => !race || race.state === 'finished';
-function pressA() {
+/** A from any phone starts a race; mid-race it hops that phone's own car into a drift. */
+function pressA(slot) {
   if (canStart()) {
     if (race && performance.now() - finishedAt < RESTART_GUARD_MS) return;
     startRace();
   } else if (race.state === 'racing') {
-    race.setDrift(true, performance.now());
+    // The keyboard (no slot) drives the first seat.
+    const car = slot === undefined || slot === null ? 0 : carOfSlot(slot);
+    if (car >= 0) race.setDrift(true, performance.now(), car);
   }
 }
 
-// ── Sound design ───────────────────────────────────────────────────────────
+// ── Input ──────────────────────────────────────────────────────────────────
 
 const channel = createChannel({
   room: launchData?.room,
@@ -586,48 +692,90 @@ const channel = createChannel({
   onB: null, // default home
   // ←/→ steer here; they must not rewrite the shared pointer sensitivity.
   deskKeys: false,
-  onCommand: (cmd) => {
+  onCommand: (cmd, slot = 0) => {
+    const car = carOfSlot(slot);
     if (cmd.type === 'calibrate' || cmd.type === 'recentre') {
-      steer.recentre();
-      flashToast('steering centred');
+      steerFor(slot).recentre();
+      flashToast('steering centred', 1400, car >= 0 && race ? car : null);
     }
     // The wheel-mode HOME button sends its own type; treat it like B.
     if (cmd.type === 'home') goHome(channel.audio, channel.link.room);
     if (cmd.type === 'button') {
       // (A and B never reach here: the channel routes them to onA / onB.)
       const b = cmd.button;
-      if (b === '1' && race) race.setBrake(true);
+      if (b === '1' && race && car >= 0) race.setBrake(true, car);
       // One direction per press: the crosspad's on-screen direction when
       // the phone sends it, else the physical button.
       const dir = cmd.menuDirection || b;
       if (dir === 'up') changeTrack(-1);
       else if (dir === 'down') changeTrack(1);
     }
-    if (cmd.type === 'button-up') {
+    if (cmd.type === 'button-up' && race && car >= 0) {
       const b = cmd.button;
-      if (b === 'A' && race) race.setDrift(false, performance.now());
-      if (b === '1' && race) race.setBrake(false);
+      if (b === 'A') race.setDrift(false, performance.now(), car);
+      if (b === '1') race.setBrake(false, car);
     }
   },
-  onSample: (sample, dt, now) => {
-    const deg = steer.update(axesFromSample(sample), dt, now, channel.pointer.bodyRate);
-    if (race) race.setSteer(deg);
+  onSample: (sample, dt, now, slot = 0) => {
+    // Each phone has its own pointer (for body rate) and its own neutral.
+    const ptr = channel.pointerFor(slot);
+    const deg = steerFor(slot).update(axesFromSample(sample), dt, now, ptr.bodyRate);
+    lastSampleAt.set(slot, performance.now());
+    const car = carOfSlot(slot);
+    if (race && car >= 0) race.setSteer(deg, car);
   },
+  onPresenceChange: (p) => onPresence(p),
 });
 
 const { audio } = channel;
+const steer = steerFor(0);           // desk/keyboard seat; also the debug read-out
+
+const announced = new Set();
+function onPresence(p) {
+  const occ = (p.slots || []).filter((s) => s.occupied).map((s) => s.slot);
+  for (const s of occ) channel.pointerFor(s);   // per-phone input from the first packet
+  const live = race && (race.state === 'racing' || race.state === 'countdown');
+  if (live) {
+    participants.forEach((slot, car) => {
+      if (phoneCars.has(car) && !occ.includes(slot) && !race.cars[car].out) {
+        race.dropCar(car, performance.now());
+        flashToast(`${slotLabel(car)} left the race`, 2200);
+      }
+    });
+    for (const s of occ) {
+      if (!participants.includes(s) && !announced.has(s)) {
+        announced.add(s);
+        flashToast(`P${s + 1} joins next race`, 2200);
+      }
+    }
+  } else {
+    announced.clear();
+    refreshRoster();
+  }
+  setTimeout(syncLinkLabel, 0);   // after the channel's own one-line label
+}
+
+function syncLinkLabel() {
+  const occ = occupiedSlots();
+  const label = $('link-t');
+  if (!label) return;
+  if (occ.length > 1) label.textContent = `${occ.length} remotes · ${occ.map((s) => `P${s + 1}`).join(' ')}`;
+}
+setInterval(syncLinkLabel, 1000);
 
 // Engine is a continuous loop that follows speed: implemented by re-ticking
 // a short tone burst on a timer (Web Audio oscillator-per-note model).
+// Split screen shares one speaker: it follows the fastest car.
 let engineTimer = null;
 let enginePhase = 0;
 function startEngine() {
   if (engineTimer) return;
   engineTimer = setInterval(() => {
     if (!race || race.state === 'ready' || !audio.ctx || audio.ctx.state !== 'running') return;
-    const speed = race.speed;
+    const lead = race.cars.reduce((a, c) => (c.speed > a.speed ? c : a), race.cars[0]);
+    const speed = lead.speed;
     if (speed < 0.5) return;
-    const f = 55 + speed * 5.5 + (race.drifting ? 38 : 0);
+    const f = 55 + speed * 5.5 + (lead.drifting ? 38 : 0);
     const g = 0.018 + Math.min(0.03, speed / 1600);
     audio.tone({ freq: f, dur: 0.09, type: 'sawtooth', gain: g, attack: 0.004 });
     if (enginePhase++ % 2 === 0) {
@@ -671,6 +819,7 @@ audio.register('race-scrape', () => {
   audio.noise({ dur: 0.12, gain: 0.06, type: 'bandpass', freq: 1800, q: 2.5 });
 });
 
+
 // ── Race lifecycle ─────────────────────────────────────────────────────────
 
 function ensureRivals() {
@@ -681,26 +830,45 @@ function ensureRivals() {
     rivalKarts.set(k.id, rk);
     scene.add(rk.group);
   }
+  // A smaller field than last race (more humans): hide the spare CPU karts.
+  const ids = new Set(race.karts.map((k) => k.id));
+  for (const [id, rk] of rivalKarts) rk.group.visible = ids.has(id);
 }
 
 function startRace() {
   if (trackIndex >= save.unlocked) return;
   resultMenuShown = false;
-  // Capture "straight" mid-countdown, once the player is holding the wheel.
-  steer.recentre(performance.now() + 1200);
+  const now = performance.now();
+
+  // Seats: every phone currently in the room (max 4), else the keyboard alone.
+  const occ = occupiedSlots().slice(0, MAX_HUMANS);
+  participants = occ.length ? occ : [0];
+  phoneCars = new Set(occ.length ? occ.map((_, i) => i) : []);
+  announced.clear();
+  for (const slot of participants) {
+    // Capture "straight" mid-countdown, once the player is holding the wheel.
+    steerFor(slot).recentre(now + 1200);
+    steerFor(slot).idle = false;
+    if (phoneCars.size) channel.pointerFor(slot);
+  }
   audio.unlock();
   startEngine();
 
   const track = TRACKS[trackIndex];
-  const ghost = save.ghosts[track.slug] || null;
-  race = new Race({ trackIndex, onEvent: handleEvent, seed: (performance.now() * 997) | 0, ghost });
+  const humans = participants.length;
+  const ghost = humans === 1 ? save.ghosts[track.slug] || null : null;
+  race = new Race({ trackIndex, onEvent: handleEvent, seed: (now * 997) | 0, ghost, humans });
+  buildCells(humans);
   ensureRivals();
   ghostKart.group.visible = false;
 
-  race.start(performance.now());
+  race.start(now);
+  // Snap every chase camera onto its kart: a fresh camera must not glide in from the origin.
+  race.cars.forEach((c, i) => chaseCamera(cameras[i], c.pos, c.motionHeading, 0, null));
+  playerKarts.forEach((k, i) => { k.group.visible = i < humans; });
   $('overlay').classList.add('hide');
   flashBanner('', 0);
-  syncHud(performance.now());
+  syncHud(now);
 }
 
 const keys = {};
@@ -717,33 +885,41 @@ window.addEventListener('keydown', (e) => {
   if (k === 'd') $('debug').classList.toggle('on');
   if (k === 'i') {
     invertSteer = !invertSteer;
-    steer.setInvert(invertSteer);
+    for (const st of steers.values()) st.setInvert(invertSteer);
     try { localStorage.setItem('senwii.racingInvert', invertSteer ? '1' : '0'); } catch { /* private mode */ }
     flashToast(invertSteer ? 'steering inverted' : 'steering normal');
   }
-  if (k === 'x' || k === '1') { if (race) race.setBrake(true); }
+  if (k === 'x' || k === '1') { if (race) race.setBrake(true, 0); }
 });
 window.addEventListener('keyup', (e) => {
   keys[e.key] = false;
-  if (e.key === ' ' || e.key === 'Enter') { if (race) race.setDrift(false, performance.now()); }
+  if (e.key === ' ' || e.key === 'Enter') { if (race) race.setDrift(false, performance.now(), 0); }
   const k = e.key.toLowerCase();
-  if (k === 'x' || k === '1') { if (race) race.setBrake(false); }
+  if (k === 'x' || k === '1') { if (race) race.setBrake(false, 0); }
 });
 // A click is A (via the channel); letting go ends the drift it started.
-window.addEventListener('pointerup', () => { if (race) race.setDrift(false, performance.now()); });
+window.addEventListener('pointerup', () => { if (race) race.setDrift(false, performance.now(), 0); });
 
 function flashBanner(text, ms = 1000) {
   $('banner').innerHTML = text;
   if (text) { $('banner').classList.add('on'); countdownPulse = performance.now() + ms; }
   else $('banner').classList.remove('on');
 }
-function flashToast(text, ms = 1400) {
-  $('toast').textContent = text;
-  $('toast').classList.add('on');
-  toastUntil = performance.now() + ms;
+/** A toast in one player's cell (`car`), or in every cell. */
+function flashToast(text, ms = 1400, car = null) {
+  const targets = car === null || car === undefined ? cellEls : [cellEls[car]].filter(Boolean);
+  for (const c of targets) {
+    c.toast.textContent = text;
+    c.toast.classList.add('on');
+    c.toastUntil = performance.now() + ms;
+  }
 }
 
+/** Per-phone haptics: a car event buzzes only its own driver's phone. */
+const buzz = (e, msg) => channel.feedback({ ...msg, slot: participants[e.car] });
+
 function handleEvent(e) {
+  const solo = race.humans === 1;
   if (e.type === 'countdown') {
     flashBanner('3', 3200);
     audio.play('race-count');
@@ -755,40 +931,49 @@ function handleEvent(e) {
     audio.play('race-hop');
   } else if (e.type === 'spark') {
     audio.play('race-spark', { tier: e.tier });
-    flashToast(['', 'BLUE DRIFT', 'ORANGE DRIFT', 'PINK DRIFT'][e.tier] || '', 600);
-    channel.feedback({ type: 'slice', combo: e.tier });
+    flashToast(['', 'BLUE DRIFT', 'ORANGE DRIFT', 'PINK DRIFT'][e.tier] || '', 600, e.car);
+    buzz(e, { type: 'slice', combo: e.tier });
   } else if (e.type === 'boost') {
     audio.play('race-boost', { tier: e.tier });
-    channel.feedback({ type: 'slice', combo: e.tier });
+    buzz(e, { type: 'slice', combo: e.tier });
   } else if (e.type === 'pad') {
     audio.play('race-pad');
-    channel.feedback({ type: 'slice', combo: 1 });
+    buzz(e, { type: 'slice', combo: 1 });
   } else if (e.type === 'lap') {
     audio.play('race-lap', { best: e.best });
-    channel.feedback({ type: 'slice', combo: e.best ? 3 : 1 });
-    flashToast(e.best ? `LAP ${e.lap} — NEW BEST ${fmtMs(e.ms)}` : `LAP ${e.lap}  ${fmtMs(e.ms)}`, 2200);
+    buzz(e, { type: 'slice', combo: e.best ? 3 : 1 });
+    flashToast(e.best ? `LAP ${e.lap} — NEW BEST ${fmtMs(e.ms)}` : `LAP ${e.lap}  ${fmtMs(e.ms)}`, 2200, e.car);
   } else if (e.type === 'rescue') {
     audio.play('fail');
-    flashToast('rescued!', 900);
-    channel.feedback({ type: 'miss' });
+    flashToast('rescued!', 900, e.car);
+    buzz(e, { type: 'miss' });
+  } else if (e.type === 'dropout') {
+    flashToast('DISCONNECTED', 4000, e.car);
   } else if (e.type === 'finish') {
     audio.play(e.place <= 3 ? 'race-go' : 'fail');
-    channel.feedback({ type: e.place === 1 ? 'slice' : 'miss', combo: 3 });
-    finishedAt = performance.now();
-    cupPoints[race.track.order] = e.points;
+    buzz(e, { type: e.place === 1 ? 'slice' : 'miss', combo: 3 });
     const track = race.track;
-    const prevBest = save.bestLaps[track.slug];
-    if (!prevBest || (e.bestLapMs && e.bestLapMs < prevBest)) {
-      save.bestLaps[track.slug] = e.bestLapMs;
-      // The best lap's keys, not whichever lap happened to be last.
-      if (race.bestRecording && race.bestRecording.length) save.ghosts[track.slug] = race.bestRecording;
-    }
     const wasUnlocked = save.unlocked;
-    if (e.place <= PODIUM && track.order + 1 >= save.unlocked) {
+    if (solo) {
+      finishedAt = performance.now();
+      cupPoints[track.order] = e.points;
+      const prevBest = save.bestLaps[track.slug];
+      if (!prevBest || (e.bestLapMs && e.bestLapMs < prevBest)) {
+        save.bestLaps[track.slug] = e.bestLapMs;
+        // The best lap's keys, not whichever lap happened to be last.
+        if (race.bestRecording && race.bestRecording.length) save.ghosts[track.slug] = race.bestRecording;
+      }
+    }
+    // Anyone's podium opens the next cup; records and ghosts stay solo-only.
+    if (!e.dnf && e.place <= PODIUM && track.order + 1 >= save.unlocked) {
       save.unlocked = Math.min(TRACKS.length, track.order + 2);
     }
     persistSave(save);
-    showResults(e, save.unlocked > wasUnlocked);
+    if (solo) showResults(e, save.unlocked > wasUnlocked);
+    else flashToast(e.dnf ? 'DNF' : `${ordinal(e.place)} place!`, 4000, e.car);
+  } else if (e.type === 'raceover' && !solo) {
+    finishedAt = performance.now();
+    showResultsMulti(e);
   }
 }
 
@@ -820,42 +1005,86 @@ function showResults(e, newlyUnlocked) {
   resultMenuShown = true;
 }
 
+/** Everyone's result once the last human is done: places, points, full order. */
+function showResultsMulti(e) {
+  const at = (car) => e.standings.findIndex((s) => s.car === car) + 1;
+  const humans = race.cars.map((c) => ({ car: c.index, place: at(c.index), dnf: c.dnf, out: c.out }))
+    .sort((a, b) => a.place - b.place);
+  const winner = humans.find((h) => !h.out && !h.dnf) || humans[0];
+  const hl = humans.map((h) => {
+    const pts = h.out ? 0 : POINTS[Math.min(POINTS.length, h.place) - 1];
+    const note = h.out ? 'left' : h.dnf ? 'DNF' : `${pts} pts`;
+    return `<div><b style="color:${cssColor(PLAYER_COLORS[h.car])}">${slotLabel(h.car)}</b> ${ordinal(h.place)} · ${note}</div>`;
+  }).join('');
+  const rows = e.standings.map((s, i) => {
+    const human = s.car !== undefined;
+    const tag = human ? slotLabel(s.car) : s.who;
+    const mark = s.dnf ? 'DNF' : s.done !== null ? icon('flag') : `${Math.round(s.prog)}m`;
+    return `<div class="${human ? 'you' : ''}${s.dnf ? ' dnf' : ''}">${i + 1}. ${tag}<b>${mark}</b></div>`;
+  }).join('');
+  $('panel').innerHTML = `<h1>${icon('flag')} <em>${slotLabel(winner.car)} wins!</em></h1>
+    <div class="humans">${hl}</div>
+    <div class="results">${rows}</div>
+    <div id="tracks"></div>
+    <div id="points"></div>
+    <div class="cta"><strong>A</strong> race again · <strong>↑↓</strong> pick track · <strong>B</strong> menu</div>`;
+  syncTrackSelect();
+  $('overlay').classList.remove('hide');
+  resultMenuShown = true;
+}
+
 function syncHud(now) {
   if (!race) return;
-  $('place').textContent = ordinal(race.rank);
-  const lap = Math.min(race.lap, race.laps);
-  $('laprow').textContent = `lap ${lap}/${race.laps} · best ${fmtMs(race.bestLapMs)}`;
-  $('timetrial').textContent = fmtMs(race.state === 'countdown' ? 0 : race.lapMs);
-  const kmh = Math.round(race.speed * 3.6);
-  const boosting = now < Math.max(race.boostUntil, race.padBoostUntil);
-  $('speed').innerHTML = `${kmh}<small> km/h${boosting ? ` ${icon('bolt', 'fill')}` : ''}</small>`;
-  const dw = $('driftwrap');
-  if (race.drifting || race.driftTier > 0) {
-    dw.classList.add('on');
-    const pct = race.driftTier === 3 ? 100
-      : race.driftTier === 2 ? 66 + ((race.driftCharge - DRIFT_CHARGE_T2) / (DRIFT_CHARGE_T3 - DRIFT_CHARGE_T2)) * 34
-      : race.driftTier === 1 ? 33 + ((race.driftCharge - DRIFT_CHARGE_T1) / (DRIFT_CHARGE_T2 - DRIFT_CHARGE_T1)) * 33
-      : (race.driftCharge / DRIFT_CHARGE_T1) * 33;
-    $('drift').style.width = `${Math.min(100, pct)}%`;
-  } else {
-    dw.classList.remove('on');
+  race.cars.forEach((car, i) => {
+    const el = cellEls[i];
+    if (!el) return;
+    el.place.textContent = ordinal(car.rank);
+    const lap = Math.min(car.lap, race.laps);
+    el.laprow.textContent = `lap ${lap}/${race.laps} · best ${fmtMs(car.bestLapMs)}`;
+    el.time.textContent = fmtMs(race.state === 'countdown' ? 0 : car.lapMs);
+    const kmh = Math.round(car.speed * 3.6);
+    const boosting = now < Math.max(car.boostUntil, car.padBoostUntil);
+    el.speed.innerHTML = `${kmh}<small> km/h${boosting ? ` ${icon('bolt', 'fill')}` : ''}</small>`;
+    if (car.drifting || car.driftTier > 0) {
+      el.driftwrap.classList.add('on');
+      const pct = car.driftTier === 3 ? 100
+        : car.driftTier === 2 ? 66 + ((car.driftCharge - DRIFT_CHARGE_T2) / (DRIFT_CHARGE_T3 - DRIFT_CHARGE_T2)) * 34
+        : car.driftTier === 1 ? 33 + ((car.driftCharge - DRIFT_CHARGE_T1) / (DRIFT_CHARGE_T2 - DRIFT_CHARGE_T1)) * 33
+        : (car.driftCharge / DRIFT_CHARGE_T1) * 33;
+      el.drift.style.width = `${Math.min(100, pct)}%`;
+    } else {
+      el.driftwrap.classList.remove('on');
+    }
+    // Done (or gone) while the others are still racing.
+    if (car.out) {
+      el.fin.innerHTML = 'DISCONNECTED';
+      el.fin.classList.add('on');
+    } else if (car.finishedMs !== null || car.dnf) {
+      el.fin.innerHTML = `${car.dnf ? 'DNF' : 'FINISHED'}<small>${ordinal(car.rank)} place</small>`;
+      el.fin.classList.add('on');
+    } else {
+      el.fin.classList.remove('on');
+    }
+  });
+  // standings strip (shown for a lone player, and in the spare cell for three)
+  if (race.cars.length === 1 || race.cars.length === 3) {
+    $('standings').innerHTML = race.standings().map((s, i) => {
+      const human = s.car !== undefined;
+      const cls = human ? ' class="you"' : '';
+      const tag = s.who === 'you' ? 'YOU' : human ? slotLabel(s.car) : s.who;
+      return `<div${cls}>${i + 1}. ${tag}</div>`;
+    }).join('');
   }
-  // standings strip
-  const st = race.standings();
-  $('standings').innerHTML = st.map((s, i) => {
-    const cls = s.who === 'you' ? ' class="you"' : '';
-    const tag = s.who === 'you' ? 'YOU' : s.who;
-    return `<div${cls}>${i + 1}. ${tag}</div>`;
-  }).join('');
   // debug
   const dbg = $('debug');
   if (dbg && dbg.classList.contains('on')) {
+    const c = race.cars[0];
     dbg.textContent = [
-      `fps ${fps.toFixed(0)}  steer ${steer.describe()}`,
-      `spd ${race.speed.toFixed(1)}  onTrack ${race.onTrack}  scraping ${race.scraping}`,
-      `drift ${race.drifting} tier ${race.driftTier} chg ${race.driftCharge.toFixed(2)}`,
-      `prog ${race.progressM.toFixed(1)}  t ${race.trackT.toFixed(3)}  lap ${race.lap}`,
-      `state ${race.state}  rank ${race.rank}`,
+      `fps ${fps.toFixed(0)}  steer ${steer.describe()}  cars ${race.cars.length}`,
+      `spd ${c.speed.toFixed(1)}  onTrack ${c.onTrack}  scraping ${c.scraping}`,
+      `drift ${c.drifting} tier ${c.driftTier} chg ${c.driftCharge.toFixed(2)}`,
+      `prog ${c.progressM.toFixed(1)}  t ${c.trackT.toFixed(3)}  lap ${c.lap}`,
+      `state ${race.state}  rank ${c.rank}`,
     ].join('\n');
   }
 }
@@ -883,40 +1112,34 @@ function placeKart(obj, x, z, heading, lean = 0, wheelSpin = 0, steerDeg = 0) {
   }
 }
 
-let scrapeAccum = 0;
-let sparkAccum = 0;
+const scrapeAccum = [0, 0, 0, 0];
+const sparkAccum = [0, 0, 0, 0];
 
-function step(now, dt) {
-  // Animate boost pads.
-  for (const pad of pads) {
-    pad.userData.pulse += dt * 4;
-    pad.material.opacity = 0.7 + Math.sin(pad.userData.pulse) * 0.25;
-  }
-
-  // Player kart.
-  const leaning = race.steer * Math.PI / 180 * 0.18;
-  const boosting = now < Math.max(race.boostUntil, race.padBoostUntil);
-  const wheelSpin = race.speed * dt / 0.42;      // r ≈ 0.42 m
-  placeKart(playerKart, race.pos.x, race.pos.z, race.heading, leaning, wheelSpin, race.steer);
-  for (const f of flames) {
-    f.visible = boosting && race.state !== 'finished';
+function stepCar(car, i, now, dt) {
+  const kart = playerKarts[i];
+  const leaning = car.steer * Math.PI / 180 * 0.18;
+  const boosting = now < Math.max(car.boostUntil, car.padBoostUntil);
+  const wheelSpin = car.speed * dt / 0.42;      // r ≈ 0.42 m
+  placeKart(kart, car.pos.x, car.pos.z, car.heading, leaning, wheelSpin, car.steer);
+  for (const f of kart.flames) {
+    f.visible = boosting && car.finishedMs === null;
     f.scale.set(1, 1, 0.6 + Math.random() * 0.9);
   }
 
   // Drift sparks from the rear wheels.
-  if (race.drifting && race.speed > 10) {
-    sparkAccum += dt;
-    const tier = race.driftTier;
+  if (car.drifting && car.speed > 10) {
+    sparkAccum[i] += dt;
+    const tier = car.driftTier;
     const color = tier >= 3 ? 0xff4e6e : tier >= 2 ? 0xff8a3e : tier >= 1 ? 0x4ecbff : 0xf0f4ff;
     const count = tier >= 2 ? 3 : 1;
-    while (sparkAccum > 0.025) {
-      sparkAccum -= 0.025;
+    while (sparkAccum[i] > 0.025) {
+      sparkAccum[i] -= 0.025;
       for (let n = 0; n < count; n += 1) {
         const side = n % 2 ? -0.8 : 0.8;
-        const rx = Math.cos(race.motionHeading) * side - Math.sin(race.motionHeading) * 1.4;
-        const rz = -Math.sin(race.motionHeading) * side - Math.cos(race.motionHeading) * 1.4;
+        const rx = Math.cos(car.motionHeading) * side - Math.sin(car.motionHeading) * 1.4;
+        const rz = -Math.sin(car.motionHeading) * side - Math.cos(car.motionHeading) * 1.4;
         spawnParticle(
-          race.pos.x + rx, 0.25, wz(race.pos.z + rz),
+          car.pos.x + rx, 0.25, wz(car.pos.z + rz),
           color,
           new THREE.Vector3((Math.random() - 0.5) * 4, 2 + Math.random() * 3, (Math.random() - 0.5) * 4),
           0.35 + Math.random() * 0.25, 0.7 + tier * 0.15,
@@ -924,14 +1147,14 @@ function step(now, dt) {
       }
     }
   } else {
-    sparkAccum = 0;
+    sparkAccum[i] = 0;
   }
 
   // Dust when off the road.
-  if (!race.onTrack && race.speed > 5) {
+  if (!car.onTrack && car.speed > 5) {
     if (Math.random() < dt * 18) {
       spawnParticle(
-        race.pos.x + (Math.random() - 0.5) * 1.4, 0.15, wz(race.pos.z) + (Math.random() - 0.5) * 1.4,
+        car.pos.x + (Math.random() - 0.5) * 1.4, 0.15, wz(car.pos.z) + (Math.random() - 0.5) * 1.4,
         0xd7c49a,
         new THREE.Vector3((Math.random() - 0.5) * 3, 1.5 + Math.random() * 2, (Math.random() - 0.5) * 3),
         0.5, 0.9,
@@ -940,10 +1163,20 @@ function step(now, dt) {
   }
 
   // Scrape sound tick.
-  if (race.scraping) {
-    scrapeAccum += dt;
-    if (scrapeAccum > 0.14) { scrapeAccum = 0; audio.play('race-scrape'); }
-  } else scrapeAccum = 0;
+  if (car.scraping) {
+    scrapeAccum[i] += dt;
+    if (scrapeAccum[i] > 0.14) { scrapeAccum[i] = 0; audio.play('race-scrape'); }
+  } else scrapeAccum[i] = 0;
+}
+
+function step(now, dt) {
+  // Animate boost pads.
+  for (const pad of pads) {
+    pad.userData.pulse += dt * 4;
+    pad.material.opacity = 0.7 + Math.sin(pad.userData.pulse) * 0.25;
+  }
+
+  race.cars.forEach((car, i) => stepCar(car, i, now, dt));
 
   // Rival karts.
   for (const k of race.karts) {
@@ -956,12 +1189,12 @@ function step(now, dt) {
     placeKart(rk, kp.x, kp.z, h, lean, k.speed * dt / 0.42, 0);
   }
 
-  // Ghost.
+  // Ghost (solo only: Race drops it when several humans race).
   if (race.state === 'racing' && race.ghost) {
-    const g = race.ghostAt(race.lapMs);
+    const g = race.ghostAt(race.cars[0].lapMs);
     if (g) {
       ghostKart.group.visible = true;
-      placeKart(ghostKart, g.x, g.z, g.h, 0, race.speed * dt / 0.42, 0);
+      placeKart(ghostKart, g.x, g.z, g.h, 0, race.cars[0].speed * dt / 0.42, 0);
     }
   } else {
     ghostKart.group.visible = race.state !== 'racing' ? false : ghostKart.group.visible;
@@ -969,12 +1202,12 @@ function step(now, dt) {
 
   stepParticles(dt);
 
-  chaseCamera(race.pos, race.motionHeading, race.speed, dt);
+  race.cars.forEach((car, i) => chaseCamera(cameras[i], car.pos, car.motionHeading, car.speed, dt));
   drawMinimap(race, now);
 }
 
 /** Behind and above the kart, looking ahead of its motion. */
-function chaseCamera(pos, motionHeading, speed, dt) {
+function chaseCamera(cam, pos, motionHeading, speed, dt) {
   const ahead = 1.8;
   const back = 8.5 - Math.min(2.4, speed / 22);
   const up = 4.2 + Math.min(1.2, speed / 40);
@@ -983,18 +1216,42 @@ function chaseCamera(pos, motionHeading, speed, dt) {
   const targetX = pos.x - Math.sin(motionHeading) * ahead;
   const targetZ = wz(pos.z - Math.cos(motionHeading) * ahead);
   const lerp = dt === null ? 1 : 1 - Math.exp(-6.5 * dt);
-  camera.position.lerp(new THREE.Vector3(camX, up, camZ), lerp);
-  camera.lookAt(new THREE.Vector3(targetX, 1.2, targetZ));
+  cam.position.lerp(new THREE.Vector3(camX, up, camZ), lerp);
+  cam.lookAt(new THREE.Vector3(targetX, 1.2, targetZ));
 }
 
 /** Menu backdrop: the player's kart parked on the selected track's grid. */
 function stepPreview(dt) {
   if (!preview) return;
-  placeKart(playerKart, preview.pos.x, preview.pos.z, preview.heading);
-  for (const f of flames) f.visible = false;
+  playerKarts.forEach((k, i) => { k.group.visible = i === 0; });
+  placeKart(playerKarts[0], preview.pos.x, preview.pos.z, preview.heading);
+  for (const f of playerKarts[0].flames) f.visible = false;
   ghostKart.group.visible = false;
   if (dt) stepParticles(dt);
-  chaseCamera(preview.pos, preview.heading, 0, dt);
+  chaseCamera(cameras[0], preview.pos, preview.heading, 0, dt);
+}
+
+/** One render per cell: each camera gets its own scissored viewport. */
+renderer.setClearColor(0x0d0b18);
+function renderViews(n) {
+  const w = window.innerWidth; const h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  if (cellEls.length !== n) buildCells(n);
+  renderer.setScissorTest(true);
+  // Wipe everything first so a spare cell (3 players) reads as a dark panel.
+  renderer.setViewport(0, 0, w, h);
+  renderer.setScissor(0, 0, w, h);
+  renderer.setClearColor(0x0d0b18);   // scene.background overwrites this on every render
+  renderer.clear();
+  for (let i = 0; i < n; i += 1) {
+    const vp = toViewport(layout.cells[i], w, h);
+    renderer.setViewport(vp.x, vp.y, vp.w, vp.h);
+    renderer.setScissor(vp.x, vp.y, vp.w, vp.h);
+    cameras[i].aspect = Math.max(1, vp.w) / Math.max(1, vp.h);
+    cameras[i].updateProjectionMatrix();
+    renderer.render(scene, cameras[i]);
+  }
+  renderer.setScissorTest(false);
 }
 
 function frame(now) {
@@ -1009,16 +1266,19 @@ function frame(now) {
   wheelFeedback(now);
   channel.poll(now);
 
+  for (const st of steers.values()) st.idle = !race || (race.state !== 'racing' && race.state !== 'countdown');
+
   if (race) {
-    // Tilt steer arrives via onSample; held arrow keys override it. With no
-    // live phone and no key, centre — a phone that drops mid-corner must not
-    // leave the wheel locked at its last angle.
+    // Tilt steer arrives via onSample; held arrow keys override it on the
+    // first seat. A phone that went quiet centres its wheel — one that drops
+    // mid-corner must not leave the car locked at its last angle.
     const kSteer = (keys.ArrowRight ? 24 : 0) + (keys.ArrowLeft ? -24 : 0);
-    if (kSteer) race.setSteer(kSteer);
-    else if (!channel.pointer.live) race.setSteer(0);
-    // Between rounds the phone rests however: keep steer idle so the next
-    // race captures from rest.
-    steer.idle = race.state !== 'racing' && race.state !== 'countdown';
+    race.cars.forEach((car, i) => {
+      const slot = participants[i];
+      const live = performance.now() - (lastSampleAt.get(slot) ?? -Infinity) < 500;
+      if (i === 0 && kSteer) race.setSteer(kSteer, 0);
+      else if (!live) race.setSteer(0, i);
+    });
 
     // Countdown pulse banner
     if (race.state === 'countdown') {
@@ -1032,26 +1292,24 @@ function frame(now) {
       }
     }
     if (countdownPulse && now > countdownPulse) { $('banner').classList.remove('on'); countdownPulse = 0; }
-    if (toastUntil && now > toastUntil) { $('toast').classList.remove('on'); toastUntil = 0; }
+    for (const c of cellEls) {
+      if (c.toastUntil && performance.now() > c.toastUntil) { c.toast.classList.remove('on'); c.toastUntil = 0; }
+    }
 
     race.update(now, dt);
     step(now, dt);
     syncHud(now);
   } else {
-    steer.idle = true;
     stepPreview(dt);
   }
 
-  const w = window.innerWidth; const h = window.innerHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.render(scene, camera);
+  renderViews(race ? race.cars.length : 1);
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 hydrateIcons();
+buildCells(1);
 loadTrack(trackIndex);
 syncTrackSelect();
 if (preview) stepPreview(null);       // snap the camera, no glide-in from origin
@@ -1060,3 +1318,25 @@ if (launchData && launchData.splash) {
 }
 requestAnimationFrame(frame);
 
+// Exposed for the end-to-end tests (tests/e2e/racing.mjs).
+//   race / cars     the live Race and its human Car objects (null / [] in the menu)
+//   participants()  car index → relay slot for the current race
+//   link, channel   the relay link and input channel; steers: slot → TraySteer
+//   cameras, layout(), cellEls  the split-screen view state actually rendered
+//   playerKarts     the per-human kart meshes; startRace() begins a race
+window.__senwii = {
+  get race() { return race; },
+  get cars() { return race ? race.cars : []; },
+  participants: () => participants.slice(),
+  link: channel.link,
+  channel,
+  steers,
+  cameras,
+  layout: () => layout,
+  cellEls,
+  playerKarts,
+  renderer,
+  scene,
+  startRace,
+  lastSampleAt,
+};

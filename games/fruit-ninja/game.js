@@ -3,7 +3,8 @@ import { consumeLaunchSplash, goHome } from '../../core/splash.js';
 
 // Carry the menu's launch banner across the navigation, then fade it out.
 const launchData = consumeLaunchSplash();
-import { FruitNinja, FIELD_H } from './logic.js';
+import { FruitMatch, FIELD_H } from './logic.js';
+import { splitLayout, toPixels, toViewport, cellAspect } from '../../core/splitscreen.js';
 import { Pointer } from '../../core/pointer.js';
 import { saveSensitivity, loadSensitivity } from '../../core/calibration.js';
 import { AudioEngine } from '../../core/audio.js';
@@ -24,9 +25,10 @@ import { hydrateIcons } from '../../core/icons.js';
 
 const $ = (id) => document.getElementById(id);
 
-// Practice mode (infinite lives) is the default while the game is being
-// tuned — add ?mortal to the URL for the real three-lives rules.
-const MORTAL = new URLSearchParams(location.search).has('mortal');
+// Real rules by default: three lives, and a bomb ends your run. Add
+// ?practice to the URL for the endless mode (misses and bombs just cost points).
+const PRACTICE = new URLSearchParams(location.search).has('practice');
+document.body.classList.toggle('practice', PRACTICE);
 
 // ── Scene ──────────────────────────────────────────────────────────────────
 const canvas = $('game');
@@ -42,9 +44,9 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2b1a0c);
 
 const FOV = 45;
-const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 100);
+// One camera per player's cell (see cellFor): same FOV and distance, so the
+// field's height always exactly fills a cell whatever its width.
 const CAM_Z = (FIELD_H / 2) / Math.tan((FOV / 2) * (Math.PI / 180));
-camera.position.set(0, 0, CAM_Z);
 
 scene.add(new THREE.AmbientLight(0xfff4e0, 0.85));
 const key = new THREE.DirectionalLight(0xfff1d6, 1.5);
@@ -431,7 +433,7 @@ for (const name of Object.keys(RIND_PAINTERS)) {
   fleshTex.set(name, makeTexture(256, 256, FLESH_PAINTERS[name]));
 }
 
-const game = new FruitNinja({ aspect: 16 / 9, onEvent: handleEvent, infiniteLives: !MORTAL });
+const match = new FruitMatch({ onEvent: handleEvent, infiniteLives: PRACTICE });
 
 // ── Meshes ─────────────────────────────────────────────────────────────────
 const sphereGeo = new THREE.SphereGeometry(1, 28, 20);
@@ -577,11 +579,23 @@ function particleMesh(p) {
   );
 }
 
-function syncMeshes(list, build, apply) {
+
+/** Put an entity (and any lights inside it) on one player's layer only. */
+function setLayer(obj, layer) {
+  obj.traverse((o) => o.layers.set(layer));
+}
+
+/**
+ * Meshes are created on first sight and tagged with their board's layer: each
+ * player's camera renders only its own layer (plus layer 0 — the wall and the
+ * lights), so six boards share one scene without seeing each other's fruit.
+ */
+function syncMeshes(list, build, apply, layer) {
   for (const item of list) {
     let m = meshes.get(item.id);
     if (!m) {
       m = build(item);
+      setLayer(m, layer);
       meshes.set(item.id, m);
       scene.add(m);
     }
@@ -592,9 +606,11 @@ function syncMeshes(list, build, apply) {
 /** Drop meshes whose logic object is gone — otherwise the scene leaks. */
 function pruneMeshes() {
   const alive = new Set();
-  for (const f of game.fruits) alive.add(f.id);
-  for (const h of game.halves) alive.add(h.id);
-  for (const p of game.particles) alive.add(p.id);
+  for (const board of match.boards.values()) {
+    for (const f of board.fruits) alive.add(f.id);
+    for (const h of board.halves) alive.add(h.id);
+    for (const p of board.particles) alive.add(p.id);
+  }
   for (const [id, m] of meshes) {
     if (alive.has(id)) continue;
     scene.remove(m);
@@ -626,11 +642,12 @@ const splatTex = makeTexture(256, 256, (ctx) => {
   }
 });
 
+
 const SPLAT_MAX = 34;
 const SPLAT_Z = -13.8;
 const splats = [];
 
-function addSplat(x, y, colour, now) {
+function addSplat(x, y, colour, now, layer) {
   const m = new THREE.Mesh(
     new THREE.PlaneGeometry(1, 1),
     new THREE.MeshBasicMaterial({
@@ -643,13 +660,23 @@ function addSplat(x, y, colour, now) {
   m.position.set(x * k, y * k, SPLAT_Z);
   m.rotation.z = rand(0, Math.PI * 2);
   m.scale.setScalar(rand(2.2, 3.6) * k * 0.55);
+  setLayer(m, layer);
   scene.add(m);
-  splats.push({ m, born: now });
-  if (splats.length > SPLAT_MAX) {
-    const old = splats.shift();
-    scene.remove(old.m);
-    old.m.material.dispose();
-  }
+  splats.push({ m, born: now, layer });
+  // Cap per player, so one busy board can't wipe everyone else's stains.
+  const mine = splats.filter((s) => s.layer === layer);
+  if (mine.length > SPLAT_MAX) removeSplat(mine[0]);
+}
+
+function removeSplat(s) {
+  scene.remove(s.m);
+  s.m.material.dispose();
+  const i = splats.indexOf(s);
+  if (i !== -1) splats.splice(i, 1);
+}
+
+function clearSplats() {
+  for (const s of [...splats]) removeSplat(s);
 }
 
 function stepSplats(now) {
@@ -658,11 +685,7 @@ function stepSplats(now) {
     const age = (now - s.born) / 1000;
     if (age < 1.4) continue;
     s.m.material.opacity = 0.85 * Math.max(0, 1 - (age - 1.4) / 4.5);
-    if (s.m.material.opacity <= 0) {
-      scene.remove(s.m);
-      s.m.material.dispose();
-      splats.splice(i, 1);
-    }
+    if (s.m.material.opacity <= 0) removeSplat(s);
   }
 }
 
@@ -714,11 +737,13 @@ const PLAYER_TINTS = [
 ];
 const tintFor = (slot) => PLAYER_TINTS[slot % PLAYER_TINTS.length];
 
+
 const visuals = new Map();   // slot → { ribbons: [glow, core], tip, tipGlow }
 function visualFor(slot) {
   let v = visuals.get(slot);
   if (v) return v;
   const tint = tintFor(slot);
+  const layer = slot + 1;
   const ribbons = [
     makeRibbon({ width: 0.5, colour: tint.glow, opacity: 0.35, blending: THREE.AdditiveBlending }),
     makeRibbon({ width: 0.16, colour: tint.core, opacity: 0.95, blending: THREE.NormalBlending }),
@@ -730,11 +755,12 @@ function visualFor(slot) {
   scene.add(tip);
   const tipGlow = new THREE.PointLight(tint.glow, 5, 6);
   scene.add(tipGlow);
+  // Only that player's own camera sees (and is lit by) their blade.
+  for (const o of [...ribbons, tip, tipGlow]) setLayer(o, layer);
   v = { ribbons, tip, tipGlow };
   visuals.set(slot, v);
   return v;
 }
-visualFor(0);   // eager — solo play's blade exists at the same instant it always has
 
 function drawOneTrail(player, v) {
   const pts = player.trail.points;
@@ -782,8 +808,15 @@ function drawOneTrail(player, v) {
   v.tipGlow.visible = player.cursor.active;
 }
 
+function hideVisual(v) {
+  for (const r of v.ribbons) r.visible = false;
+  v.tip.visible = false;
+  v.tipGlow.visible = false;
+}
+
 function drawTrail() {
-  for (const [slot, player] of game.players) drawOneTrail(player, visualFor(slot));
+  for (const [slot, board] of match.boards) drawOneTrail(board.getPlayer(0), visualFor(slot));
+  for (const [slot, v] of visuals) if (!match.boards.has(slot)) hideVisual(v);
 }
 
 // ── Audio ──────────────────────────────────────────────────────────────────
@@ -838,18 +871,16 @@ audio.register('fn-gameover', (a) => {
 // ── Pointer, one per connected phone ────────────────────────────────────────
 // Rate-based gyro aiming, no calibration flow: each pointer is live from its
 // own phone's first packet, and the learned gyro gain lives inside the
-// Pointer itself — independently per phone, since two devices rarely share a
-// gyro convention. `inputs` is keyed by the server-assigned slot (see
-// server.js); slot 0 always exists so mouse/keyboard desk-testing keeps
-// working with no phone attached at all, exactly as before multiplayer.
+// Pointer itself — independently per phone. `inputs` is keyed by the
+// server-assigned slot (see server.js); slot 0 always exists so mouse/keyboard
+// desk-testing keeps working with no phone attached at all.
 const inputs = new Map();   // slot → { pointer, lastSampleAt }
 
 function inputFor(slot) {
   let inp = inputs.get(slot);
   if (!inp) {
     const p = new Pointer({});
-    // Only slot 0's sensitivity is persisted (see the 'speed' command below
-    // for why); every other slot starts at the default.
+    // Only slot 0's sensitivity is persisted; every other slot starts at default.
     p.sensitivity = (slot === 0 ? loadSensitivity() : null) ?? 1;
     p.setViewport(window.innerWidth, window.innerHeight);
     inp = { pointer: p, lastSampleAt: 0 };
@@ -857,57 +888,119 @@ function inputFor(slot) {
   }
   return inp;
 }
-inputFor(0);   // always present, for the desk-testing mouse/keyboard fallback
+inputFor(0);
+
+// ── Cells: one viewport + camera + DOM HUD per board ───────────────────────
+const cells = new Map();   // slot → cell
+const layerOf = (slot) => slot + 1;
+
+/** CSS colour for a slot's blade, so its text reads as theirs. */
+const cssTint = (slot) => `#${tintFor(slot).core.toString(16).padStart(6, '0')}`;
+
+function cellFor(slot) {
+  let c = cells.get(slot);
+  if (c) return c;
+  const cam = new THREE.PerspectiveCamera(FOV, 1, 0.1, 100);
+  cam.position.set(0, 0, CAM_Z);
+  cam.layers.enable(layerOf(slot));
+  const el = document.createElement('div');
+  el.className = 'cell';
+  el.dataset.slot = String(slot);
+  el.style.setProperty('--tint', cssTint(slot));
+  el.innerHTML = `
+    <div class="c-score">
+      <div class="c-score-row"><span class="c-ico"><i data-icon="fruit"></i></span><span class="c-score-v">0</span></div>
+      <div class="c-best">BEST: 0</div>
+      <div class="c-name">P${slot + 1}</div>
+    </div>
+    <div class="c-lives"><div><span class="x">✗</span><span class="x">✗</span><span class="x">✗</span></div>
+      <div class="c-practice">PRACTICE · ∞ LIVES</div></div>
+    <div class="c-fx"></div>
+    <div class="c-miss">✗</div>
+    <div class="c-flash"></div>
+    <div class="c-out"><div><b>OUT</b><span></span><small>waiting for the others…</small></div></div>`;
+  $('cells').appendChild(el);
+  hydrateIcons(el);
+  c = {
+    slot, layer: layerOf(slot), cam, el,
+    rect: { x: 0, y: 0, w: 1, h: 1 }, px: { x: 0, y: 0, w: 1, h: 1 }, aspect: 16 / 9,
+    refs: {
+      score: el.querySelector('.c-score-v'), best: el.querySelector('.c-best'),
+      xs: [...el.querySelectorAll('.c-lives .x')], fx: el.querySelector('.c-fx'),
+      miss: el.querySelector('.c-miss'), flash: el.querySelector('.c-flash'),
+      out: el.querySelector('.c-out'), outScore: el.querySelector('.c-out span'),
+    },
+    missTimer: 0,
+  };
+  cells.set(slot, c);
+  return c;
+}
+
+/** Split the window between the boards in play and size every camera/pointer to its cell. */
+function layoutCells() {
+  const slots = match.slots;
+  const W = Math.max(1, window.innerWidth);
+  const H = Math.max(1, window.innerHeight);
+  const { cells: rects } = splitLayout(slots.length, 'cols');
+  document.body.classList.toggle('multi', slots.length > 1);
+  slots.forEach((slot, i) => {
+    const c = cellFor(slot);
+    c.rect = rects[i];
+    c.px = toPixels(rects[i], W, H);
+    c.aspect = cellAspect(rects[i], W, H);
+    c.cam.aspect = c.aspect;
+    c.cam.updateProjectionMatrix();
+    match.setAspect(slot, c.aspect);
+    Object.assign(c.el.style, {
+      left: `${c.px.x}px`, top: `${c.px.y}px`, width: `${c.px.w}px`, height: `${c.px.h}px`,
+    });
+    c.el.style.setProperty('--s', String(clamp(Math.min(c.px.w / 1000, c.px.h / 640), 0.45, 1.3)));
+    inputFor(slot).pointer.setViewport(c.px.w, c.px.h);
+  });
+  for (const [slot, c] of cells) {
+    if (slots.includes(slot)) continue;
+    c.el.remove();
+    cells.delete(slot);
+  }
+}
 
 function resize() {
-  const w = Math.max(1, window.innerWidth);
-  const h = Math.max(1, window.innerHeight);
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  game.setAspect(camera.aspect);
-  for (const inp of inputs.values()) inp.pointer.setViewport(w, h);
+  renderer.setSize(Math.max(1, window.innerWidth), Math.max(1, window.innerHeight), false);
+  layoutCells();
 }
 window.addEventListener('resize', resize);
 
-/** Normalised pointer (0..1, y down) → world units on the z=0 plane. */
-function toWorld(nx, ny) {
+/** Cell-normalised pointer (0..1, y down) → world units on the z=0 plane. */
+function toWorld(nx, ny, aspect) {
   const halfH = FIELD_H / 2;
-  const halfW = halfH * camera.aspect;
+  const halfW = halfH * aspect;
   return { x: (nx - 0.5) * 2 * halfW, y: (0.5 - ny) * 2 * halfH };
 }
 
-/** World units on z=0 → CSS pixels, for the DOM splash text. */
-function toScreen(x, y) {
+/** World units → percent of the cell, for the DOM splash text. */
+function toCellPercent(x, y, aspect) {
   const halfH = FIELD_H / 2;
-  const halfW = halfH * camera.aspect;
-  return {
-    x: (x / (2 * halfW) + 0.5) * window.innerWidth,
-    y: (0.5 - y / (2 * halfH)) * window.innerHeight,
-  };
+  const halfW = halfH * aspect;
+  return { left: (x / (2 * halfW) + 0.5) * 100, top: (0.5 - y / (2 * halfH)) * 100 };
 }
 
 /**
  * The link pill names every connected phone and whether it's actually
  * streaming motion — "P2 no motion" is the difference between a paired phone
- * and a playing one, and it's exactly the state that otherwise looks like
- * "multiplayer is broken" (a phone that never tapped Enable motion sensors).
+ * and a playing one.
  */
 function syncLinkLabel() {
   const occupied = (link.slots || []).filter((s) => s.occupied);
+  const streaming = (slot) => {
+    const inp = inputs.get(slot);
+    return inp && performance.now() - inp.lastSampleAt < 2000;
+  };
   if (occupied.length === 0) { $('link-t').textContent = 'no remote connected'; return; }
   if (occupied.length === 1) {
-    const s = occupied[0];
-    const inp = inputs.get(s.slot);
-    const streaming = inp && performance.now() - inp.lastSampleAt < 2000;
-    $('link-t').textContent = streaming ? 'remote connected' : 'remote paired · no motion yet';
+    $('link-t').textContent = streaming(occupied[0].slot) ? 'remote connected' : 'remote paired · no motion yet';
     return;
   }
-  $('link-t').textContent = occupied.map((s) => {
-    const inp = inputs.get(s.slot);
-    const streaming = inp && performance.now() - inp.lastSampleAt < 2000;
-    return `P${s.slot + 1}${streaming ? '' : ' (no motion)'}`;
-  }).join(' · ');
+  $('link-t').textContent = occupied.map((s) => `P${s.slot + 1}${streaming(s.slot) ? '' : ' (no motion)'}`).join(' · ');
 }
 setInterval(syncLinkLabel, 1000);
 
@@ -915,6 +1008,38 @@ setInterval(syncLinkLabel, 1000);
 function recentreSlot(slot) {
   inputFor(slot).pointer.recentre();
   flash(link.controllers > 1 ? `P${slot + 1} re-centred` : 're-centred');
+}
+
+// ── Who is playing ─────────────────────────────────────────────────────────
+// deskMode: no phone has ever been seen this round, so slot 0 is the
+// mouse/keyboard player. The moment a phone appears the board belongs to it.
+let deskMode = true;
+
+const occupiedSlots = () => (link.slots || []).filter((s) => s.occupied).map((s) => s.slot);
+
+/** Reconcile the running match with whoever is connected right now. */
+function syncParticipants() {
+  const occupied = occupiedSlots();
+  const now = performance.now();
+  if (match.phase !== 'playing') return;
+  if (deskMode && occupied.length > 0) {
+    deskMode = false;
+    // The only connected phone isn't slot 0: the desk board was a placeholder.
+    if (!occupied.includes(0)) { startGame({ keepDelay: true }); return; }
+  }
+  if (!deskMode) {
+    for (const slot of occupied) {
+      if (match.join(slot, now)) flash(`P${slot + 1} joined`);
+    }
+    for (const slot of match.slots) {
+      if (!occupied.includes(slot) && !match.isOver(slot)) {
+        match.leave(slot, now);
+        flash(`P${slot + 1} left`);
+      }
+    }
+  }
+  layoutCells();
+  syncHud();
 }
 
 const link = new GameLink({
@@ -935,27 +1060,15 @@ const link = new GameLink({
     else if (cmd.type === 'speed') {
       const inp = inputFor(slot);
       inp.pointer.sensitivity = clamp(inp.pointer.sensitivity * (cmd.factor || 1), 0.2, 6);
-      // Only slot 0 is persisted: one shared localStorage key can't hold
-      // four players' preferences, and slot 0 is the phone guaranteed to be
-      // around across sessions (solo play). Others adjust for the session.
       if (slot === 0) saveSensitivity(inp.pointer.sensitivity);
       const label = link.controllers > 1 ? `P${slot + 1} speed` : 'pointer speed';
       flash(`${label} ${(inp.pointer.sensitivity * 100).toFixed(0)}%`);
     }
   },
   onPresence: (p) => {
-    const on = p.controller > 0;
-    $('dot').classList.toggle('on', on);
+    $('dot').classList.toggle('on', p.controller > 0);
     syncLinkLabel();
-    // A departed phone's blade shouldn't hang in the air forever. logic.js's
-    // staleness cutoff already stops it from cutting fruit, but the visible
-    // cursor should vanish right away rather than freeze at its last spot.
-    for (const s of p.slots || []) {
-      if (s.occupied) continue;
-      const player = game.players.get(s.slot);
-      if (player) { player.cursor.active = false; player.trail.clear(); }
-    }
-    syncHud();
+    syncParticipants();
   },
 });
 
@@ -964,44 +1077,45 @@ link.onLatency = (ms) => { for (const inp of inputs.values()) inp.pointer.setNet
 setInterval(() => link.probeLatency(), 3000);
 
 // ── DOM effects: splash text, the red miss ✗, the bomb flash ──────────────
-function splash(worldX, worldY, text, cls = '', colour = null) {
+function splash(slot, worldX, worldY, text, cls = '', colour = null) {
+  const c = cells.get(slot);
+  if (!c) return;
   const el = document.createElement('div');
   el.className = `splash ${cls}`;
   el.textContent = text;
   if (colour) el.style.color = colour;
-  const p = toScreen(worldX, worldY);
-  el.style.left = `${p.x}px`;
-  el.style.top = `${p.y}px`;
-  $('fx').appendChild(el);
+  const p = toCellPercent(worldX, worldY, c.aspect);
+  el.style.left = `${p.left}%`;
+  el.style.top = `${p.top}%`;
+  c.refs.fx.appendChild(el);
   setTimeout(() => el.remove(), 950);
 }
 
-/** CSS colour for a slot's blade, so its floating "+n" reads as theirs. */
-const cssTint = (slot) => `#${tintFor(slot).core.toString(16).padStart(6, '0')}`;
-
-let missTimer = 0;
-function missFlash(worldX) {
-  const el = $('miss-x');
-  const p = toScreen(clamp(worldX, -game.w * 0.42, game.w * 0.42), -FIELD_H * 0.32);
-  el.style.left = `${p.x}px`;
+function missFlash(slot, worldX) {
+  const c = cells.get(slot);
+  if (!c) return;
+  const el = c.refs.miss;
+  const board = match.board(slot);
+  const lim = (board ? board.w : 16) * 0.42;
+  el.style.left = `${toCellPercent(clamp(worldX, -lim, lim), 0, c.aspect).left}%`;
   el.classList.remove('on');
   void el.offsetWidth;               // restart the animation
   el.classList.add('on');
-  clearTimeout(missTimer);
-  missTimer = setTimeout(() => el.classList.remove('on'), 800);
+  clearTimeout(c.missTimer);
+  c.missTimer = setTimeout(() => el.classList.remove('on'), 800);
 }
 
-function bombFlash() {
-  const el = $('flash');
-  el.classList.remove('on');
-  void el.offsetWidth;
-  el.classList.add('on');
+function bombFlash(slot) {
+  const c = cells.get(slot);
+  if (!c) return;
+  c.refs.flash.classList.remove('on');
+  void c.refs.flash.offsetWidth;
+  c.refs.flash.classList.add('on');
 }
 
 // ── Events from the logic layer ────────────────────────────────────────────
 // Browsers keep audio locked until a click or keypress on THIS page. When the
-// whole session is phone-driven, that never happens — so say so, once, at the
-// first moment sound was supposed to play.
+// whole session is phone-driven, that never happens — so say so, once.
 let soundHintShown = false;
 function maybeSoundHint() {
   if (soundHintShown || audio.muted) return;
@@ -1011,44 +1125,73 @@ function maybeSoundHint() {
   }
 }
 
+let lastThrowAt = 0;
+let finishedAt = -Infinity;
+const RESTART_GUARD_MS = 1000;   // a swinging player's A press must not skip the results
+
 function handleEvent(e) {
+  const slot = e.slot ?? 0;
   if (e.type === 'launch') {
-    audio.play('fn-throw');
+    // Four boards launch at once in a full lobby: one whoosh, not four.
+    const t = performance.now();
+    if (t - lastThrowAt > 80) { lastThrowAt = t; audio.play('fn-throw'); }
   } else if (e.type === 'slice') {
     maybeSoundHint();
     audio.play('fn-slice', { size: e.r, combo: e.combo });
-    addSplat(e.x, e.y, e.kind.splat, performance.now());
+    addSplat(e.x, e.y, e.kind.splat, performance.now(), layerOf(slot));
     if (e.critical) {
       audio.play('fn-critical');
-      splash(e.x, e.y, 'CRITICAL', 'crit');
-      splash(e.x, e.y - 0.9, `+${e.gained}`, 'plus', cssTint(e.slot));
+      splash(slot, e.x, e.y, 'CRITICAL', 'crit');
+      splash(slot, e.x, e.y - 0.9, `+${e.gained}`, 'plus', cssTint(slot));
     } else if (e.combo >= 3) {
       audio.play('fn-combo', { combo: e.combo });
-      splash(e.x, e.y, `COMBO ×${e.combo}`, 'combo');
+      splash(slot, e.x, e.y, `COMBO ×${e.combo}`, 'combo');
     } else {
-      splash(e.x, e.y, `+${e.gained}`, 'plus', cssTint(e.slot));
+      splash(slot, e.x, e.y, `+${e.gained}`, 'plus', cssTint(slot));
     }
-    // Only the phone that landed the cut feels it — see server.js: a
-    // feedback message with a slot targets that one controller.
-    link.feedback({ type: 'slice', combo: e.combo, slot: e.slot });
+    // Only the phone that landed the cut feels it (server routes by slot).
+    link.feedback({ type: 'slice', combo: e.combo, slot });
   } else if (e.type === 'bomb') {
     audio.play('explode');
-    bombFlash();
-    if (!e.fatal) splash(e.x, e.y, '−10', 'penalty');
-    link.feedback({ type: 'bomb' });
+    bombFlash(slot);
+    if (!e.fatal) splash(slot, e.x, e.y, '−10', 'penalty');
+    link.feedback({ type: 'bomb', slot });
   } else if (e.type === 'miss') {
     audio.play('fn-miss');
-    missFlash(e.x ?? 0);
-    link.feedback({ type: 'miss' });
-  } else if (e.type === 'gameover') {
+    missFlash(slot, e.x ?? 0);
+    link.feedback({ type: 'miss', slot });
+  } else if (e.type === 'out') {
     audio.play('fn-gameover');
-    const best = Math.max(Number(localStorage.getItem('fn.best') || 0), e.score);
-    localStorage.setItem('fn.best', String(best));
-    showOverlay(`<h1 class="gameover">GAME OVER</h1>
-      <div id="final">score <b>${e.score}</b> · best <b>${best}</b></div>
-      <div class="cta"><strong>Space</strong> / <strong>A</strong> to play again</div>`);
+    const board = match.board(slot);
+    // Their blade goes with them.
+    if (board) { const p = board.getPlayer(0); p.cursor.active = false; p.trail.clear(); }
+  } else if (e.type === 'matchover') {
+    finishedAt = performance.now();
+    showResults(e);
   }
   syncHud();
+}
+
+function showResults(e) {
+  if (e.solo) {
+    const score = e.standings[0].score;
+    const best = Math.max(Number(localStorage.getItem('fn.best') || 0), score);
+    localStorage.setItem('fn.best', String(best));
+    showOverlay(`<h1 class="gameover">GAME OVER</h1>
+      <div id="final">score <b>${score}</b> · best <b>${best}</b></div>
+      <div class="cta"><strong>Space</strong> / <strong>A</strong> to play again</div>`);
+    return;
+  }
+  const title = e.winners.length > 1
+    ? 'DRAW!'
+    : `<span style="color:${cssTint(e.winners[0])}">P${e.winners[0] + 1}</span> WINS!`;
+  const why = { lives: 'out of lives', out: 'out', left: 'left' };
+  const rows = e.standings.map((s) => `<div class="row${e.winners.includes(s.slot) ? ' win' : ''}">
+      <span class="pdot" style="background:${cssTint(s.slot)}"></span>${s.rank}. P${s.slot + 1}
+      <i>${why[s.reason] || ''}</i><b>${s.score}</b></div>`).join('');
+  showOverlay(`<h1 class="gameover" style="font-size:72px">${title}</h1>
+    <div class="results">${rows}</div>
+    <div class="cta"><strong>Space</strong> / <strong>A</strong> to play again</div>`);
 }
 
 // ── Overlays / HUD ─────────────────────────────────────────────────────────
@@ -1063,69 +1206,88 @@ const showOverlay = (html) => { $('panel').innerHTML = html; $('overlay').classL
 const hideOverlay = () => $('overlay').classList.add('hide');
 
 function syncHud() {
-  $('score-v').textContent = game.state.score;
-  $('best').textContent = `BEST: ${Math.max(Number(localStorage.getItem('fn.best') || 0), game.state.score)}`;
-  const xs = $('lives').querySelectorAll('.x');
-  for (let i = 0; i < xs.length; i += 1) {
-    xs[i].classList.toggle('lost', !game.infiniteLives && i >= game.state.lives);
-  }
-  $('practice').style.display = game.infiniteLives ? '' : 'none';
-
-  // Multiplayer scoreboard: everyone's individual score, on the shared
-  // board — only shown once a second phone actually joins, so solo play's
-  // HUD is pixel-identical to before this existed.
-  const board = $('players');
-  const connected = (link.slots || [])
-    .map((s, slot) => ({ slot, occupied: s.occupied }))
-    .filter((s) => s.occupied);
-  if (connected.length > 1) {
-    board.classList.add('on');
-    board.innerHTML = connected.map(({ slot }) => {
-      const p = game.getPlayer(slot);
-      return `<div class="prow"><span class="pdot" style="background:${cssTint(slot)}"></span>`
-        + `P${slot + 1} <b>${p.score}</b></div>`;
-    }).join('');
-  } else {
-    board.classList.remove('on');
+  const multi = match.count > 1;
+  const best = Number(localStorage.getItem('fn.best') || 0);
+  for (const [slot, board] of match.boards) {
+    const c = cellFor(slot);
+    const st = board.state;
+    c.refs.score.textContent = st.score;
+    c.refs.best.textContent = `BEST: ${Math.max(best, st.score)}`;
+    for (let i = 0; i < c.refs.xs.length; i += 1) {
+      c.refs.xs[i].classList.toggle('lost', !PRACTICE && i >= st.lives);
+    }
+    // Solo shows the full-screen game-over panel instead.
+    const out = multi && match.isOver(slot);
+    c.refs.out.classList.toggle('on', out);
+    if (out) c.refs.outScore.textContent = `score ${st.score}`;
   }
 }
 
-function startGame() {
+function startGame({ keepDelay = false } = {}) {
   hideOverlay();
-  game.start(performance.now());
+  clearSplats();
+  const occupied = occupiedSlots();
+  deskMode = occupied.length === 0;
+  const first = !keepDelay ? 900 : 0;
+  match.start(occupied, performance.now());
+  layoutCells();
+  void first;
   syncHud();
 }
 
 function beginPlay() {
   audio.unlock();
-  if (game.state.phase !== 'playing') startGame();
+  if (match.phase === 'playing') return;
+  if (performance.now() - finishedAt < RESTART_GUARD_MS) return;
+  startGame();
 }
 
 /** Mirror the logic state into the scene graph. Split out so the verification
  *  harness can time a frame's work directly, without depending on rAF cadence. */
 function syncScene(now = performance.now()) {
-  syncMeshes(game.fruits, fruitMesh, (m, f) => {
-    m.position.set(f.x, f.y, 0);
-    m.rotation.set(f.rot * f.spinAxis.x, f.rot * f.spinAxis.y, f.rot * f.spinAxis.z);
-    if (m.userData.spark) {
-      // The fuse flickers.
-      const flicker = 0.65 + Math.abs(Math.sin(now / 47 + f.id)) * 0.8;
-      m.userData.glow.intensity = 5 * flicker;
-      m.userData.spark.scale.setScalar(flicker);
-    }
-  });
-  syncMeshes(game.halves, halfMesh, (m, h) => {
-    m.position.set(h.x, h.y, 0);
-    applyHalfOrientation(m, h);
-  });
-  syncMeshes(game.particles, particleMesh, (m, p) => {
-    m.position.set(p.x, p.y, 0.2);
-    m.scale.setScalar(p.r * Math.max(0.2, p.life));
-    m.material.opacity = clamp(p.life, 0, 1);
-  });
+  for (const [slot, board] of match.boards) {
+    const layer = layerOf(slot);
+    syncMeshes(board.fruits, fruitMesh, (m, f) => {
+      m.position.set(f.x, f.y, 0);
+      m.rotation.set(f.rot * f.spinAxis.x, f.rot * f.spinAxis.y, f.rot * f.spinAxis.z);
+      if (m.userData.spark) {
+        // The fuse flickers.
+        const flicker = 0.65 + Math.abs(Math.sin(now / 47 + f.id)) * 0.8;
+        m.userData.glow.intensity = 5 * flicker;
+        m.userData.spark.scale.setScalar(flicker);
+      }
+    }, layer);
+    syncMeshes(board.halves, halfMesh, (m, h) => {
+      m.position.set(h.x, h.y, 0);
+      applyHalfOrientation(m, h);
+    }, layer);
+    syncMeshes(board.particles, particleMesh, (m, p) => {
+      m.position.set(p.x, p.y, 0.2);
+      m.scale.setScalar(p.r * Math.max(0.2, p.life));
+      m.material.opacity = clamp(p.life, 0, 1);
+    }, layer);
+  }
   pruneMeshes();
   stepSplats(now);
   drawTrail();
+}
+
+/** One render per cell, each through its own camera and scissor rect. */
+function renderCells() {
+  const W = Math.max(1, window.innerWidth);
+  const H = Math.max(1, window.innerHeight);
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, W, H);
+  renderer.clear();
+  renderer.setScissorTest(true);
+  for (const slot of match.slots) {
+    const c = cells.get(slot);
+    if (!c) continue;
+    const vp = toViewport(c.rect, W, H);
+    renderer.setViewport(vp.x, vp.y, vp.w, vp.h);
+    renderer.setScissor(vp.x, vp.y, vp.w, vp.h);
+    renderer.render(scene, c.cam);
+  }
 }
 
 // ── Loop ───────────────────────────────────────────────────────────────────
@@ -1147,29 +1309,35 @@ function frame(now) {
     fpsMark = now;
   }
 
-  // Mouse fallback only ever stands in for slot 0 — there's one mouse.
-  const in0 = inputFor(0);
-  if (!in0.pointer.live && mouse.active) in0.pointer.setFromMouse(mouse.x, mouse.y);
-
-  // Drive every connected phone's blade every frame, not every packet. The
-  // trail is sampled here too, so its speed window sees display-rate motion
-  // rather than packet-rate steps — which is what the slice threshold is
-  // tuned against.
-  for (const [slot, inp] of inputs) {
+  // Drive every board's blade every frame, not every packet: the trail's
+  // speed window then sees display-rate motion, which is what the slice
+  // threshold is tuned against.
+  for (const slot of match.slots) {
+    if (match.isOver(slot)) continue;
+    const inp = inputFor(slot);
+    const c = cells.get(slot);
+    if (!c) continue;
     if (inp.pointer.live && now - inp.pointer.lastSeen > 500) inp.pointer.live = false;
-    if (inp.pointer.live || (slot === 0 && mouse.active)) {
+    // Mouse fallback only ever stands in for slot 0 — there's one mouse.
+    const useMouse = slot === 0 && !inp.pointer.live && mouse.active;
+    if (useMouse) {
+      const nx = clamp((mouse.x * window.innerWidth - c.px.x) / c.px.w, 0, 1);
+      const ny = clamp((mouse.y * window.innerHeight - c.px.y) / c.px.h, 0, 1);
+      inp.pointer.setFromMouse(nx, ny);
+    }
+    if (inp.pointer.live || useMouse) {
       const aim = inp.pointer.sampleAt(now);
-      const p = toWorld(aim.x, aim.y);
-      game.setCursor(p.x, p.y, now, slot);
+      const p = toWorld(aim.x, aim.y, c.aspect);
+      match.setCursor(slot, p.x, p.y, now);
     }
   }
 
-  game.update(now, dt);
+  match.update(now, dt);
   syncScene(now);
 
   if (toastUntil && now > toastUntil) { toastUntil = 0; $('toast').classList.remove('on'); }
 
-  renderer.render(scene, camera);
+  renderCells();
 }
 
 // ── Input ──────────────────────────────────────────────────────────────────
@@ -1205,48 +1373,52 @@ window.addEventListener('keydown', (e) => {
 });
 
 setInterval(() => {
+  syncHud();
   if (!$('debug').classList.contains('on')) return;
   const p0 = inputFor(0).pointer;
   const players = [...inputs.entries()]
     .map(([slot, inp]) => `P${slot + 1}:${inp.pointer.hasGyro ? (inp.pointer.gyroTrusted ? '✓' : '…') : '–'}`)
     .join(' ');
+  const b0 = match.board(match.slots[0]);
   $('debug').textContent = [
     `mode        ${p0.mode}`,
     `gyro map    ${p0.describeMap()}`,
     `rate        ${p0.rateDps.yaw.toFixed(1)} / ${p0.rateDps.pitch.toFixed(1)} deg/s`,
     `pointer     ${p0.display.x.toFixed(3)}, ${p0.display.y.toFixed(3)}`,
-    `gesture     ${game.trail.speed().toFixed(2)} u/s`,
+    `gesture     ${b0 ? b0.trail.speed().toFixed(2) : '–'} u/s`,
     `sensor rate ${link.rate.toFixed(0)} Hz`,
     `source      ${p0.source}`,
     `fps         ${fps.toFixed(0)}`,
     `players     ${players}`,
-    `entities    ${game.fruits.length}f ${game.halves.length}h ${game.particles.length}p`,
+    `boards      ${match.slots.map((s) => `P${s + 1}`).join(' ')}`,
     `meshes      ${meshes.size} · splats ${splats.length}`,
   ].join('\n');
 }, 250);
 
 resize();
-syncHud();
 // Try to unlock audio immediately: when the page was reached by clicking a
 // channel tile, the browser carries that gesture across the navigation and
 // this succeeds — sound works without ever touching the PC again.
 audio.unlock();
-// Straight into play — no calibration gate. Called here at the bottom of the
-// module: startGame touches const helpers that are in the temporal dead zone
-// until the whole module has evaluated.
+// Straight into play — no lobby. Called here at the bottom of the module:
+// startGame touches const helpers that are in the temporal dead zone until
+// the whole module has evaluated. Phones already in the room arrive via
+// presence a moment later and take their boards (see syncParticipants).
 startGame();
 // Hold the first fruit until the launch splash has fully faded: its throw
 // whoosh under the loading banner read as a stray leftover menu sound.
-game.state.nextSpawn = performance.now() + 1800;
+for (const b of match.boards.values()) b.state.nextSpawn = performance.now() + 1800;
 requestAnimationFrame(frame);
 
-// Exposed for the verification harness. `pointer` is slot 0's, kept for
-// scripts written against the old single-player shape; `inputs` is the full
-// per-slot map for multiplayer-aware verification.
+// Exposed for the verification harness / e2e tests. `game` is the first
+// board (what the single-player build exposed); `match`/`cells` are the full
+// multiplayer picture.
 window.__senwii = {
-  game, pointer: inputFor(0).pointer, inputs, audio, link, toWorld, toScreen,
-  scene, camera, renderer, meshes, splats, visuals,
-  syncScene, drawTrail, pruneMeshes,
+  match, cells, inputs, audio, link, toWorld, toCellPercent,
+  get game() { return match.board(match.slots[0]); },
+  get pointer() { return inputFor(0).pointer; },
+  scene, renderer, meshes, splats, visuals,
+  syncScene, drawTrail, pruneMeshes, layoutCells, startGame, beginPlay,
   fps: () => fps,
 };
 

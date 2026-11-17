@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FruitNinja, FIELD_H } from './logic.js';
+import { FruitNinja, FruitMatch, FIELD_H, MAX_BOARDS } from './logic.js';
 
 /**
  * The eight mechanics that had to survive the 2D→3D port.
@@ -276,4 +276,225 @@ test('the shared life pool costs everyone, regardless of who is playing', () => 
   f.vy = -1;
   g.update(16, 0.016);
   assert.equal(g.state.lives, 2, 'one shared life lost');
+});
+
+// ── Multiplayer: one independent board per player ───────────────────────────
+
+/** A running match with spawning suppressed so tests place fruit by hand. */
+function match(slots, opts = {}) {
+  const events = [];
+  const m = new FruitMatch({ onEvent: (e) => events.push(e), ...opts });
+  m.start(slots, 0);
+  for (const b of m.boards.values()) b.state.nextSpawn = Infinity;
+  return { m, events };
+}
+const putOn = (m, slot, x, y, bomb = false) => {
+  const f = {
+    x, y, vx: 0, vy: 0, r: 0.65, rot: 0, spin: 0,
+    spinAxis: { x: 0, y: 1, z: 0 }, bomb, kind: { rind: 0, flesh: 0, splat: 0, name: 'x' }, id: 1,
+  };
+  m.board(slot).fruits.push(f);
+  return f;
+};
+function swing(m, slot, clock, x0 = -3, x1 = 3, y = 0) {
+  for (let i = 0; i <= 5; i += 1) {
+    clock.t += 16;
+    m.setCursor(slot, x0 + ((x1 - x0) * i) / 5, y, clock.t);
+    for (const b of m.boards.values()) b.state.nextSpawn = Infinity;
+    m.update(clock.t, 0.016);
+  }
+}
+/** Let `n` fruit hit the floor on a board, one frame at a time. */
+function dropMisses(m, slot, clock, n) {
+  for (let i = 0; i < n; i += 1) {
+    const f = putOn(m, slot, 0, -6);
+    f.vy = -5;
+    for (let k = 0; k < 10 && m.board(slot).fruits.includes(f); k += 1) {
+      clock.t += 16;
+      for (const b of m.boards.values()) b.state.nextSpawn = Infinity;
+      m.update(clock.t, 0.016);
+    }
+  }
+}
+
+test('a solo game ends after three missed fruit (no more endless mode)', () => {
+  const { m, events } = match([0]);
+  const clock = { t: 0 };
+  dropMisses(m, 0, clock, 2);
+  assert.equal(m.phase, 'playing');
+  assert.equal(m.board(0).state.lives, 1);
+  dropMisses(m, 0, clock, 1);
+  assert.equal(m.phase, 'over');
+  assert.equal(events.filter((e) => e.type === 'matchover').length, 1);
+  assert.equal(m.result.solo, true);
+});
+
+test('a bomb ends that player\'s run at once', () => {
+  const { m, events } = match([0]);
+  putOn(m, 0, 0, 0, true);
+  swing(m, 0, { t: 0 });
+  assert.equal(m.phase, 'over');
+  assert.ok(events.some((e) => e.type === 'bomb' && e.fatal));
+  assert.ok(events.some((e) => e.type === 'out' && e.slot === 0 && e.reason === 'out'));
+});
+
+test('practice mode never ends: misses and bombs cost nothing but points', () => {
+  const { m } = match([0], { infiniteLives: true });
+  const clock = { t: 0 };
+  dropMisses(m, 0, clock, 6);
+  assert.equal(m.phase, 'playing');
+  putOn(m, 0, 0, 0, true);
+  swing(m, 0, clock);
+  assert.equal(m.phase, 'playing');
+});
+
+test('each player has their own fruit, lives and score', () => {
+  const { m } = match([0, 1, 2]);
+  assert.deepEqual(m.slots, [0, 1, 2]);
+  const clock = { t: 0 };
+  putOn(m, 1, 0, 0);
+  swing(m, 1, clock);                       // only P2 slices
+  assert.ok(m.board(1).state.score > 0);
+  assert.equal(m.board(0).state.score, 0);
+  assert.equal(m.board(2).state.score, 0);
+  dropMisses(m, 2, clock, 1);               // only P3 misses
+  assert.equal(m.board(2).state.lives, 2);
+  assert.equal(m.board(0).state.lives, 3);
+  assert.equal(m.board(1).state.lives, 3);
+  assert.equal(m.board(0).fruits.length, 0, 'P2\'s fruit never appears on P1\'s board');
+});
+
+test('a blade only cuts on its own board', () => {
+  const { m } = match([0, 1]);
+  const f = putOn(m, 0, 0, 0);              // fruit on P1's board…
+  swing(m, 1, { t: 0 });                    // …P2 swings through the same spot
+  assert.ok(m.board(0).fruits.includes(f), 'untouched');
+  assert.equal(m.board(0).state.score, 0);
+});
+
+test('one player going out does not end the match for the others', () => {
+  const { m, events } = match([0, 1]);
+  const clock = { t: 0 };
+  dropMisses(m, 0, clock, 3);
+  assert.equal(m.isOver(0), true);
+  assert.equal(m.isOver(1), false);
+  assert.equal(m.phase, 'playing');
+  assert.ok(events.some((e) => e.type === 'out' && e.slot === 0));
+  assert.ok(!events.some((e) => e.type === 'matchover'));
+});
+
+test('the match ends when the last board falls; highest score wins', () => {
+  const { m, events } = match([0, 1]);
+  const clock = { t: 0 };
+  putOn(m, 1, 0, 0);
+  swing(m, 1, clock);                       // P2 scores
+  dropMisses(m, 0, clock, 3);               // P1 out with 0
+  assert.equal(m.phase, 'playing');
+  dropMisses(m, 1, clock, 3);               // P2 out
+  assert.equal(m.phase, 'over');
+  const over = events.find((e) => e.type === 'matchover');
+  assert.deepEqual(over.winners, [1]);
+  assert.deepEqual(over.standings.map((s) => s.slot), [1, 0]);
+  assert.deepEqual(over.standings.map((s) => s.rank), [1, 2]);
+});
+
+test('a lower-ranked-at-the-time player can still overtake someone already out', () => {
+  const { m } = match([0, 1]);
+  const clock = { t: 0 };
+  putOn(m, 0, 0, 0);
+  swing(m, 0, clock);
+  dropMisses(m, 0, clock, 3);
+  const p1 = m.board(0).state.score;
+  assert.ok(p1 > 0 && m.phase === 'playing');
+  for (let i = 0; i < p1 + 1; i += 1) { putOn(m, 1, 0, 0); swing(m, 1, clock); }
+  dropMisses(m, 1, clock, 3);
+  assert.equal(m.phase, 'over');
+  assert.ok(m.board(1).state.score > p1);
+  assert.deepEqual(m.result.winners, [1]);
+});
+
+test('equal scores: the one who lasted longer ranks higher', () => {
+  const { m } = match([0, 1]);
+  const clock = { t: 0 };
+  dropMisses(m, 0, clock, 3);               // P1 out first, score 0
+  dropMisses(m, 1, clock, 3);               // P2 out later, score 0
+  assert.deepEqual(m.result.standings.map((s) => s.slot), [1, 0]);
+  assert.deepEqual(m.result.winners, [1]);
+});
+
+test('a late joiner gets a fresh board immediately; duplicates and out-of-range are refused', () => {
+  const { m, events } = match([0]);
+  assert.equal(m.join(1, 100), true);
+  assert.deepEqual(m.slots, [0, 1]);
+  assert.equal(m.board(1).state.lives, 3);
+  assert.equal(m.board(1).state.phase, 'playing');
+  assert.ok(events.some((e) => e.type === 'join' && e.slot === 1));
+  assert.equal(m.join(1, 100), false, 'already seated');
+  assert.equal(m.join(MAX_BOARDS, 100), false, 'no fifth player');
+  assert.equal(m.join(-1, 100), false);
+});
+
+test('a player who leaves forfeits but keeps their score on the results', () => {
+  const { m, events } = match([0, 1]);
+  const clock = { t: 0 };
+  putOn(m, 0, 0, 0);
+  swing(m, 0, clock);
+  const score = m.board(0).state.score;
+  assert.equal(m.leave(0, clock.t), true);
+  assert.ok(events.some((e) => e.type === 'out' && e.slot === 0 && e.reason === 'left'));
+  assert.equal(m.phase, 'playing', 'the other player carries on');
+  dropMisses(m, 1, clock, 3);
+  assert.equal(m.phase, 'over');
+  assert.equal(m.result.standings.find((s) => s.slot === 0).score, score);
+  assert.equal(m.leave(0, clock.t), false, 'already out');
+});
+
+test('everyone leaving ends the match instead of hanging it', () => {
+  const { m } = match([0, 1]);
+  m.leave(0, 10);
+  m.leave(1, 10);
+  assert.equal(m.phase, 'over');
+});
+
+test('an eliminated board takes no further input', () => {
+  const { m } = match([0, 1]);
+  const clock = { t: 0 };
+  dropMisses(m, 0, clock, 3);
+  putOn(m, 0, 0, 0);
+  swing(m, 0, clock);
+  assert.equal(m.board(0).state.score, 0);
+});
+
+test('each board spawns on its own width', () => {
+  const m = new FruitMatch();
+  m.start([0, 1], 0, { 0: 0.6, 1: 1.8 });
+  assert.ok(Math.abs(m.board(0).w - 9 * 0.6) < 1e-9);
+  assert.ok(Math.abs(m.board(1).w - 9 * 1.8) < 1e-9);
+  m.setAspect(0, 1);
+  assert.equal(m.board(0).w, 9);
+});
+
+test('restarting resets everyone and drops boards that are no longer connected', () => {
+  const { m } = match([0, 1, 2]);
+  const clock = { t: 0 };
+  putOn(m, 1, 0, 0);
+  swing(m, 1, clock);
+  m.start([1, 3], 5000);
+  assert.deepEqual(m.slots, [1, 3]);
+  assert.equal(m.board(1).state.score, 0);
+  assert.equal(m.phase, 'playing');
+  assert.equal(m.result, null);
+  m.start([], 6000);
+  assert.deepEqual(m.slots, [0], 'nobody connected → desk player on slot 0');
+});
+
+test('fruit still in the air when a player goes out finishes falling and clears', () => {
+  const { m } = match([0]);
+  const clock = { t: 0 };
+  const f = putOn(m, 0, 0, 3);
+  f.vy = 10;
+  dropMisses(m, 0, clock, 3);
+  assert.equal(m.phase, 'over');
+  for (let i = 0; i < 300; i += 1) { clock.t += 16; m.update(clock.t, 0.016); }
+  assert.equal(m.board(0).fruits.length, 0, 'nothing frozen mid-air');
 });

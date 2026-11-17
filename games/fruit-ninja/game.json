@@ -1,6 +1,6 @@
 {
   "title": "Fruit Ninja",
-  "tagline": "Swing the phone like a sword. Up to 4 blades, one board.",
+  "tagline": "Swing the phone like a sword. Three lives, up to 4 players, split screen.",
   "icon": "fruit",
   "players": 4,
   "order": 1

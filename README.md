@@ -81,8 +81,8 @@ play.
 
 | Game | How to play | Players |
 | --- | --- | --- |
-| [Turbo Racing](games/racing/) | Hold the phone like a steering wheel to steer, hop-drift for boost. Three cups of CPU rivals. | 1 human + 5 CPU racers |
-| [Fruit Ninja](games/fruit-ninja/) | Swing to slice fruit, dodge bombs and build combos. | Up to 4 |
+| [Turbo Racing](games/racing/) | Hold the phone like a steering wheel to steer, hop-drift for boost. Three cups. Every phone that joins gets its own split-screen view. | Up to 4 humans (split-screen) + CPU rivals filling the 6-kart grid |
+| [Fruit Ninja](games/fruit-ninja/) | Swing to slice fruit, dodge bombs and build combos. Three lives; a bomb ends your run. Each player gets their own split-screen board; last one standing with the top score wins. | Up to 4 (split screen) |
 | [Alien Attack](games/alien-attack/) | Roll the phone flat to fly and press A to fire. | 1 |
 | [Shooting Range](games/shooting-range/) | Point and press A to hit targets against the clock. | 1 |
 | [Bowling](games/bowling/) | Point down the lane, swing your hand to bowl — speed and spin come from the swing. Ten frames, standard scoring. | 1 |
