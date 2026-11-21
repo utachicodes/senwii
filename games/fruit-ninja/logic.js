@@ -52,6 +52,7 @@ export class FruitNinja {
       comboUntil: 0,
       nextSpawn: 0,
       startedAt: 0,
+      held: false,            // phone briefly gone: no new fruit, misses are free
     };
 
     this.fruits = [];
@@ -107,7 +108,7 @@ export class FruitNinja {
   start(now) {
     Object.assign(this.state, {
       phase: 'playing', score: 0, lives: 3, combo: 0, comboUntil: 0,
-      startedAt: now, nextSpawn: now + 900,
+      startedAt: now, nextSpawn: now + 900, held: false,
     });
     this.fruits.length = 0;
     this.halves.length = 0;
@@ -212,7 +213,10 @@ export class FruitNinja {
       return;
     }
 
-    if (now >= this.state.nextSpawn) {
+    if (this.state.held) {
+      // Nothing launches while held; the clock restarts on release.
+      this.state.nextSpawn = Math.max(this.state.nextSpawn, now + 1200);
+    } else if (now >= this.state.nextSpawn) {
       const roll = Math.random();
       const burst = roll < 0.15 ? 4 : roll < 0.35 ? 3 : roll < 0.62 ? 2 : 1;
       for (let i = 0; i < burst; i += 1) this.spawn(Math.random() < this.bombChance(now), now);
@@ -295,6 +299,7 @@ export class FruitNinja {
       if (f.y + f.r < floor) {
         this.fruits.splice(i, 1);
         if (!f.bomb && this.state.phase === 'playing') {
+          if (this.state.held) continue;   // dropped while its player was away
           if (!this.infiniteLives) this.state.lives -= 1;
           this.onEvent({ type: 'miss', lives: this.state.lives, x: f.x });
           if (this.state.lives <= 0) {
@@ -438,6 +443,17 @@ export class FruitMatch {
     meta.reason = 'left';
     b.end(now);        // → 'gameover' → #forward marks it out
     return true;
+  }
+
+  /**
+   * Pause/resume one board while its phone reconnects. A held board launches
+   * nothing and fruit already in the air can't cost a life, so a Wi-Fi blip
+   * or a dimmed screen isn't a death sentence. The caller decides when a
+   * disconnect has gone on long enough to forfeit with leave().
+   */
+  hold(slot, on) {
+    const b = this.boards.get(slot);
+    if (b) b.state.held = !!on;
   }
 
   setAspect(slot, aspect) { this.boards.get(slot)?.setAspect(aspect); }

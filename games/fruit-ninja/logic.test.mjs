@@ -498,3 +498,20 @@ test('fruit still in the air when a player goes out finishes falling and clears'
   for (let i = 0; i < 300; i += 1) { clock.t += 16; m.update(clock.t, 0.016); }
   assert.equal(m.board(0).fruits.length, 0, 'nothing frozen mid-air');
 });
+
+test('a held board (phone reconnecting) loses no lives and launches no fruit', () => {
+  const { m } = match([0]);
+  const clock = { t: 0 };
+  m.hold(0, true);
+  dropMisses(m, 0, clock, 5);
+  assert.equal(m.phase, 'playing', 'a dropped connection is not a game over');
+  assert.equal(m.board(0).state.lives, 3);
+  const before = m.board(0).fruits.length;
+  m.board(0).state.nextSpawn = 0;
+  clock.t += 16;
+  m.update(clock.t, 0.016);
+  assert.equal(m.board(0).fruits.length, before, 'nothing spawns while held');
+  m.hold(0, false);
+  dropMisses(m, 0, clock, 1);
+  assert.equal(m.board(0).state.lives, 2, 'misses count again once back');
+});

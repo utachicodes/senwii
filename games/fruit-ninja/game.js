@@ -1057,6 +1057,19 @@ let deskMode = true;
 
 const occupiedSlots = () => (link.slots || []).filter((s) => s.occupied).map((s) => s.slot);
 
+// Phone sockets drop constantly: the screen dims, Wi-Fi hiccups, the player
+// glances at a notification. Forfeiting on the first missing presence ended
+// solo rounds "for no reason" a second before the phone reconnected. Instead a
+// vanished slot's board is held (no fruit, no lost lives) and only forfeits if
+// the phone stays gone.
+const LEAVE_GRACE_MS = 10000;
+const away = new Map();           // slot → forfeit timer
+
+function clearAway() {
+  for (const t of away.values()) clearTimeout(t);
+  away.clear();
+}
+
 /** Reconcile the running match with whoever is connected right now. */
 function syncParticipants() {
   const occupied = occupiedSlots();
@@ -1069,12 +1082,25 @@ function syncParticipants() {
   }
   if (!deskMode) {
     for (const slot of occupied) {
-      if (match.join(slot, now)) flash(`P${slot + 1} joined`);
+      if (away.has(slot)) {
+        clearTimeout(away.get(slot));
+        away.delete(slot);
+        match.hold(slot, false);
+        flash(match.count > 1 ? `P${slot + 1} back` : 'reconnected');
+      } else if (match.join(slot, now)) {
+        flash(`P${slot + 1} joined`);
+      }
     }
     for (const slot of match.slots) {
-      if (!occupied.includes(slot) && !match.isOver(slot)) {
-        match.leave(slot, now);
-        flash(`P${slot + 1} left`);
+      if (!occupied.includes(slot) && !match.isOver(slot) && !away.has(slot)) {
+        match.hold(slot, true);
+        flash(match.count > 1 ? `P${slot + 1} reconnecting…` : 'remote reconnecting…');
+        away.set(slot, setTimeout(() => {
+          away.delete(slot);
+          if (match.leave(slot, performance.now())) flash(`P${slot + 1} left`);
+          layoutCells();
+          syncHud();
+        }, LEAVE_GRACE_MS));
       }
     }
   }
@@ -1270,6 +1296,7 @@ function syncHud() {
 }
 
 function startGame() {
+  clearAway();
   if (!lobby) hideOverlay();
   clearSplats();
   const occupied = occupiedSlots();
